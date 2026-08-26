@@ -16,6 +16,11 @@ from bidexhands.tasks.shadow_hand_door_close_outward import ShadowHandDoorCloseO
 from bidexhands.tasks.shadow_hand_door_open_inward import ShadowHandDoorOpenInward
 from bidexhands.tasks.shadow_hand_door_open_outward import ShadowHandDoorOpenOutward
 from bidexhands.tasks.shadow_hand_bottle_cap import ShadowHandBottleCap
+from bidexhands.tasks.shadow_hand_bottle_cap_v2 import (
+    ShadowHandBottleCapV2A,
+    ShadowHandBottleCapV2B,
+    ShadowHandBottleCapV2C,
+)
 from bidexhands.tasks.shadow_hand_push_block import ShadowHandPushBlock
 from bidexhands.tasks.shadow_hand_swing_cup import ShadowHandSwingCup
 from bidexhands.tasks.shadow_hand_grasp_and_place import ShadowHandGraspAndPlace
@@ -188,5 +193,4 @@ def parse_task(args, cfg, cfg_train, sim_params, agent_index):
             warn_task_name()
         env = RLgamesVecTaskPython(task, rl_device)
     return task, env
-
 

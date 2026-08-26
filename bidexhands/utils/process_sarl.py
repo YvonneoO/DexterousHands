@@ -3,6 +3,7 @@ from bidexhands.algorithms.rl.sac import SAC
 from bidexhands.algorithms.rl.td3 import TD3
 from bidexhands.algorithms.rl.ddpg import DDPG
 from bidexhands.algorithms.rl.trpo import TRPO
+import os
 
 def process_sarl(args, env, cfg_train, logdir):
     learn_cfg = cfg_train["learn"]
@@ -29,6 +30,13 @@ def process_sarl(args, env, cfg_train, logdir):
               apply_reset=False,
               asymmetric=(env.num_states > 0)
               )
+
+    if args.resume > 0 and args.model_dir == "":
+        chkpt_path = os.path.join(logdir, "model_{}.pt".format(args.resume))
+        if not os.path.isfile(chkpt_path):
+            raise FileNotFoundError("Resume checkpoint not found: {}".format(chkpt_path))
+        print("Resuming training from {}".format(chkpt_path))
+        model.load(chkpt_path)
 
     # ppo.test("/home/hp-3070/logs/demo/scissors/ppo_seed0/model_6000.pt")
     if is_testing and args.model_dir != "":

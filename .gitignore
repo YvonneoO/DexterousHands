@@ -136,3 +136,11 @@ bidexhands/runs
 assets/dataset
 
 bidexhands.egg-info
+
+# Ego2Contact data-collection overlay: never track data/logs/checkpoints
+runs/
+smoke_logs_seed-1/
+brev_smoke_logs_seed-1/
+*.pt
+*.pth
+*.ckpt

@@ -33,8 +33,11 @@ class BaseTask():
 
         self.headless = cfg["headless"]
 
-        # double check!
-        self.graphics_device_id = self.device_id
+        # CUDA_VISIBLE_DEVICES remaps the compute device, but Isaac Gym's
+        # Vulkan graphics index remains a physical GPU index.  Allow launchers
+        # to bind graphics explicitly while preserving the repository default.
+        self.graphics_device_id = int(os.environ.get(
+            "ISAAC_GRAPHICS_DEVICE_ID", self.device_id))
         # if enable_camera_sensors == False and self.headless == True:
         #     self.graphics_device_id = -1
 
