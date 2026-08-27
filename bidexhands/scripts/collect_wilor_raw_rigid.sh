@@ -79,6 +79,14 @@ export BIDEX_HAND_COLOR_SAME=1
 export BIDEX_HAND_COLOR_RGB="0.42,0.52,0.56"
 export BIDEX_TACTILE_TASK="${tactile_task_title}"
 
+# Handover creates a static goal_object actor for task visualization. Hide it
+# from RGB capture by default so the RGB->tactile model sees only the real
+# manipulated object. This is a render-only collector toggle; observations,
+# rewards, success, and policy checkpoint stay unchanged.
+if [[ "${TASK_NAME:-}" == "ShadowHandOver" && -z "${BIDEX_HIDE_GOAL_OBJECT_VISUAL:-}" ]]; then
+  export BIDEX_HIDE_GOAL_OBJECT_VISUAL=1
+fi
+
 # Raw rigid contacts are projected with Gaussian weights onto the EgoTouch
 # 21x21 layout (217 valid taxels per hand). No temporal EMA or normalization.
 export BIDEX_CONTACT_PROJECTION=rigid_contacts

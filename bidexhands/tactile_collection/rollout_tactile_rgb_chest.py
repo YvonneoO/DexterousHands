@@ -100,6 +100,67 @@ def apply_visual_style(task):
             )
 
 
+def _goal_object_indices_for_render(task):
+    indices = getattr(task, "goal_object_indices", None)
+    root_states = getattr(task, "root_state_tensor", None)
+    if indices is None or root_states is None:
+        return None, None
+    if not torch.is_tensor(indices):
+        indices = torch.as_tensor(indices, device=task.device)
+    indices_long = indices.to(device=root_states.device, dtype=torch.long).flatten()
+    if indices_long.numel() == 0:
+        return None, None
+    valid = indices_long[(indices_long >= 0) & (indices_long < root_states.shape[0])]
+    if valid.numel() == 0:
+        return None, None
+    return valid, valid.to(dtype=torch.int32)
+
+
+def hide_goal_object_for_render(task):
+    """Temporarily hide Handover-style target/goal visual from RGB capture.
+
+    Some Bi-DexHands tasks create a static `goal_object` actor as a visual
+    target.  For RGB->tactile learning this ghost object is a label leak /
+    distractor, but we still want the policy, reward, observations, and
+    physics step to stay identical.  During camera rendering only, move the
+    goal actor far away, render the image, then restore its root state before
+    the next environment step.
+    """
+    if not parse_bool_env("BIDEX_HIDE_GOAL_OBJECT_VISUAL", False):
+        return None
+    indices_long, indices_int = _goal_object_indices_for_render(task)
+    if indices_long is None:
+        return None
+    original = task.root_state_tensor[indices_long].clone()
+    far = torch.as_tensor(
+        parse_vec3_env("BIDEX_HIDE_GOAL_OBJECT_POS", "1000,1000,-1000"),
+        device=task.root_state_tensor.device,
+        dtype=task.root_state_tensor.dtype,
+    )
+    task.root_state_tensor[indices_long, 0:3] = far
+    task.root_state_tensor[indices_long, 7:13] = 0
+    task.gym.set_actor_root_state_tensor_indexed(
+        task.sim,
+        gymtorch.unwrap_tensor(task.root_state_tensor),
+        gymtorch.unwrap_tensor(indices_int),
+        int(indices_int.numel()),
+    )
+    return indices_long, indices_int, original
+
+
+def restore_goal_object_after_render(task, hidden_state):
+    if hidden_state is None:
+        return
+    indices_long, indices_int, original = hidden_state
+    task.root_state_tensor[indices_long] = original
+    task.gym.set_actor_root_state_tensor_indexed(
+        task.sim,
+        gymtorch.unwrap_tensor(task.root_state_tensor),
+        gymtorch.unwrap_tensor(indices_int),
+        int(indices_int.numel()),
+    )
+
+
 def create_camera(task, width, height):
     from isaacgym import gymapi
 
@@ -268,6 +329,7 @@ def position_ego_camera(task, camera, palm_handle):
 def capture_frame(task, camera, width, height, path):
     from isaacgym import gymapi
 
+    hidden_goal_state = hide_goal_object_for_render(task)
     task.gym.fetch_results(task.sim, True)
     task.gym.step_graphics(task.sim)
     task.gym.render_all_camera_sensors(task.sim)
@@ -275,6 +337,7 @@ def capture_frame(task, camera, width, height, path):
         task.gym.get_camera_image(task.sim, task.envs[0], camera, gymapi.IMAGE_COLOR),
         dtype=np.uint8,
     )
+    restore_goal_object_after_render(task, hidden_goal_state)
     rgba = rgba.reshape(height, width, 4)
     image = Image.fromarray(rgba[:, :, :3], mode="RGB")
     if parse_bool_env("BIDEX_CROP_RGB", False):
