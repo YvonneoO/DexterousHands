@@ -177,11 +177,97 @@ def coverage_report(path: Path, min_mapped_force_fraction: float):
         }
 
 
+def _body_matches_tokens(body_name: str, tokens):
+    lower = body_name.lower()
+    return any(token.lower() in lower for token in tokens)
+
+
+def saved_coverage_relevant_report(saved_coverage, ignore_unmapped_body_tokens, min_mapped_force_fraction):
+    """Return task-relevant coverage pass while still recording ignored unmapped contacts.
+
+    The dense tactile layout intentionally covers fingertip/finger taxels, not forearm/wrist/knuckle
+    rigid bodies. Contacts on ignored bodies are kept in the report but removed from the denominator
+    when deciding whether mapped taxel force coverage is acceptable.
+    """
+
+    ignore_unmapped_body_tokens = list(ignore_unmapped_body_tokens or [])
+    sides = saved_coverage.get("sides") or {}
+    ignored = {}
+    nonignored = {}
+    ignored_force_n = 0.0
+    ignored_contact_count = 0
+    nonignored_force_n = 0.0
+    nonignored_contact_count = 0
+
+    for side, side_report in sides.items():
+        body_counts = side_report.get("unmapped_body_contact_count") or {}
+        body_forces = side_report.get("unmapped_body_force_n") or {}
+        for body, count in body_counts.items():
+            force = float(body_forces.get(body, 0.0))
+            count = int(count)
+            bucket = ignored if _body_matches_tokens(body, ignore_unmapped_body_tokens) else nonignored
+            bucket.setdefault(side, {})[body] = {"count": count, "force_n": force}
+            if bucket is ignored:
+                ignored_force_n += force
+                ignored_contact_count += count
+            else:
+                nonignored_force_n += force
+                nonignored_contact_count += count
+
+    combined = dict(saved_coverage.get("combined") or {})
+    total_force = float(combined.get("total_normal_force_n") or 0.0)
+    mapped_force = float(combined.get("mapped_normal_force_n") or 0.0)
+    total_count = int(combined.get("total_contact_count") or 0)
+    mapped_count = int(combined.get("mapped_contact_count") or 0)
+    relevant_total_force = max(0.0, total_force - ignored_force_n)
+    relevant_total_count = max(0, total_count - ignored_contact_count)
+    relevant_mapped_force_fraction = (
+        mapped_force / relevant_total_force if relevant_total_force > 0.0 else None
+    )
+    relevant_mapped_contact_fraction = (
+        float(mapped_count) / float(relevant_total_count) if relevant_total_count > 0 else None
+    )
+    saved_available = bool(saved_coverage.get("combined", {}).get("coverage_available", True))
+    relevant_pass = bool(
+        saved_available
+        and nonignored_contact_count == 0
+        and relevant_total_force > 0.0
+        and relevant_mapped_force_fraction is not None
+        and relevant_mapped_force_fraction >= min_mapped_force_fraction
+    )
+    return {
+        "strict_saved_report_pass": bool(saved_coverage.get("pass")),
+        "ignore_unmapped_body_tokens": ignore_unmapped_body_tokens,
+        "ignored_unmapped_bodies": ignored,
+        "ignored_unmapped_contact_count": ignored_contact_count,
+        "ignored_unmapped_force_n": ignored_force_n,
+        "nonignored_unmapped_bodies": nonignored,
+        "nonignored_unmapped_contact_count": nonignored_contact_count,
+        "nonignored_unmapped_force_n": nonignored_force_n,
+        "relevant_total_contact_count": relevant_total_count,
+        "relevant_total_normal_force_n": relevant_total_force,
+        "relevant_mapped_force_fraction": relevant_mapped_force_fraction,
+        "relevant_mapped_contact_fraction": relevant_mapped_contact_fraction,
+        "minimum_mapped_force_fraction": min_mapped_force_fraction,
+        "pass": relevant_pass,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("roots", nargs="+", type=Path)
     parser.add_argument("--require-coverage", action="store_true")
     parser.add_argument("--min-mapped-force-fraction", type=float, default=0.95)
+    parser.add_argument(
+        "--ignore-unmapped-body-token",
+        action="append",
+        default=[],
+        help=(
+            "Treat unmapped contacts whose rigid-body name contains this token as recorded "
+            "but not invalid for task-relevant coverage QA. May be repeated, e.g. "
+            "--ignore-unmapped-body-token forearm --ignore-unmapped-body-token wrist."
+        ),
+    )
     args = parser.parse_args()
     reports = []
     failed = False
@@ -201,6 +287,11 @@ def main():
                     with coverage_json.open() as handle:
                         saved_coverage = json.load(handle)
                     item["coverage"]["saved_report_pass"] = bool(saved_coverage.get("pass"))
+                    item["coverage"]["task_relevant_saved_report"] = saved_coverage_relevant_report(
+                        saved_coverage,
+                        args.ignore_unmapped_body_token,
+                        args.min_mapped_force_fraction,
+                    )
                 item["pass"] = (
                     item["pressure"]["no_inf"]
                     and item["pressure"]["valid_layout"]
@@ -213,8 +304,11 @@ def main():
                     and (
                         not args.require_coverage
                         or (
-                            item["coverage"]["pass"]
-                            and item["coverage"]["saved_report_pass"]
+                            (
+                                item["coverage"]["pass"]
+                                and item["coverage"]["saved_report_pass"]
+                            )
+                            or item["coverage"]["task_relevant_saved_report"]["pass"]
                         )
                     )
                 )
