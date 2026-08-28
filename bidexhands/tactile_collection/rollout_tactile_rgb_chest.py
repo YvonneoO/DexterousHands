@@ -731,6 +731,15 @@ def main():
             else:
                 failed_episode_ended = True
             episode_id += 1
+            if parse_bool_env("BIDEX_PROGRESS_LOG", False) and episode_count % 5 == 0:
+                elapsed = time.time() - start
+                rate = successful_episodes / elapsed * 60 if elapsed > 0 else 0.0
+                print(
+                    "PROGRESS episode_count={} successful_episodes={} step={} elapsed_s={:.1f} success_per_min={:.2f}".format(
+                        episode_count, successful_episodes, step, elapsed, rate
+                    ),
+                    flush=True,
+                )
 
         for name in state_names:
             if hasattr(task, name):
