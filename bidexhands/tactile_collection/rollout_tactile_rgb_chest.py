@@ -648,6 +648,17 @@ def main():
     success_only_buffer = bool(int(os.environ.get(
         "BIDEX_SUCCESS_ONLY_BUFFER", "1" if stop_after_successes else "0"
     )))
+    # Per-step and per-rgb-frame indices marking where the *current* episode's
+    # data starts in the shared trace/tactile lists. On failure we truncate
+    # back to these marks (discarding only the failed episode's own steps),
+    # never to empty -- clearing the whole buffer on any failure would also
+    # discard every already-successful episode accumulated before it, which
+    # silently produced near-empty shards on any task whose per-episode
+    # success rate is below ~100% (the collector's own stop condition counts
+    # *cumulative* successes, so it can run to completion having "succeeded"
+    # while persisting almost nothing).
+    episode_start_len = 0
+    episode_start_frame_len = 0
     start = time.time()
 
     for step in range(steps):
@@ -767,27 +778,42 @@ def main():
             trace["rgb_camera_eye"].append(eye)
             trace["rgb_camera_target"].append(target)
             captured_frames += 1
+        if bool(done_np[0]) and not failed_episode_ended:
+            # A successful episode (or the final one, about to stop_now) just
+            # completed. Advance the truncation marks so that a LATER failure
+            # only discards the steps belonging to the episode that actually
+            # failed, not this one.
+            episode_start_len = len(trace["frame_index"])
+            episode_start_frame_len = len(trace["rgb_frame_step"])
         if stop_now:
             print("SUCCESS_TARGET_REACHED step={} episode_id={}".format(step, episode_id - 1), flush=True)
             break
         if success_only_buffer and failed_episode_ended:
-            # Rare-success tasks may require thousands of rollout steps.  Keep
-            # only the current episode so RGB, tactile, and state memory/disk
-            # usage is bounded while the deterministic success search runs.
+            # Rare-success tasks may require thousands of rollout steps. Trim
+            # back to episode_start_len/episode_start_frame_len -- i.e. discard
+            # only the steps/frames belonging to the episode that just failed
+            # -- so memory/disk usage stays bounded WITHOUT throwing away every
+            # already-successful episode accumulated before it (the original
+            # behavior here cleared these buffers to empty on any failure,
+            # silently losing prior successes on any task whose per-episode
+            # success rate is below ~100%).
             for values in tactile.values():
-                values[:] = []
-            for values in trace.values():
-                values[:] = []
+                del values[episode_start_len:]
+            for key, values in trace.items():
+                if key in ("rgb_frame_step", "rgb_camera_eye", "rgb_camera_target"):
+                    del values[episode_start_frame_len:]
+                else:
+                    del values[episode_start_len:]
             for frame_name in os.listdir(frames_dir):
                 if frame_name.endswith(".png"):
-                    os.unlink(os.path.join(frames_dir, frame_name))
-            captured_frames = 0
-            body_force_totals = {"left": {}, "right": {}}
-            coverage_unmapped_body_totals = {
-                "left": {"force_n": {}, "contact_count": {}},
-                "right": {"force_n": {}, "contact_count": {}},
-            }
-            coverage_unmapped_by_episode = {}
+                    frame_idx = int(os.path.splitext(frame_name)[0].rsplit("_", 1)[-1])
+                    if frame_idx >= episode_start_frame_len:
+                        os.unlink(os.path.join(frames_dir, frame_name))
+            captured_frames = episode_start_frame_len
+            # body_force_totals / coverage_unmapped_body_totals / coverage_unmapped_by_episode
+            # are cumulative *reporting* aggregates, not part of the persisted per-episode
+            # trajectory data; left as-is rather than un-adding just the failed episode's
+            # small contribution (an accepted minor imprecision in the aggregate stats only).
 
     elapsed = time.time() - start
     actual_steps = len(trace["frame_index"])
