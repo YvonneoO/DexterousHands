@@ -127,9 +127,9 @@ class ShadowHandScissors(BaseTask):
         # can be "openai", "full_no_vel", "full", "full_state"
         self.obs_type = self.cfg["env"]["observationType"]
 
-        if not (self.obs_type in ["point_cloud", "full_state"]):
+        if not (self.obs_type in ["point_cloud", "full_state", "proprio_only"]):
             raise Exception(
-                "Unknown type of observations!\nobservationType should be one of: [point_cloud, full_state]")
+                "Unknown type of observations!\nobservationType should be one of: [point_cloud, full_state, proprio_only]")
 
         print("Obs type:", self.obs_type)
 
@@ -137,7 +137,9 @@ class ShadowHandScissors(BaseTask):
         self.num_obs_dict = {
             "point_cloud": 417 + self.num_point_cloud_feature_dim * 3,
             "point_cloud_for_distill": 417 + self.num_point_cloud_feature_dim * 3,
-            "full_state": 417
+            "full_state": 417,
+            # tactile-SR ablation "P" baseline: see compute_proprio_only_state.
+            "proprio_only": 338,
         }
         self.num_hand_obs = 72 + 95 + 26 + 6
         self.up_axis = 'z'
@@ -778,9 +780,77 @@ class ShadowHandScissors(BaseTask):
             self.compute_full_state()
         elif self.obs_type == "point_cloud":
             self.compute_point_cloud_observation()
+        elif self.obs_type == "proprio_only":
+            self.compute_proprio_only_state()
 
         if self.asymmetric_obs:
             self.compute_full_state(True)
+
+    def compute_proprio_only_state(self):
+        """
+        Tactile-SR ablation "P" (blind) baseline: same bimanual hand-state block as
+        compute_full_state, minus the fingertip force/torque segment (the teacher's
+        already-baked-in coarse tactile signal, 30 dims/hand) and minus the object/
+        scissors tail entirely (not proprioception -- needs external perception on a
+        real robot). 338-dimensional layout, identical structure to
+        shadow_hand_pen.py's compute_proprio_only_state:
+
+        Index       Description
+        0 - 23      right shadow hand dof position
+        24 - 47     right shadow hand dof velocity
+        48 - 71     right shadow hand dof force
+        72 - 136    right shadow hand fingertip pose, linear velocity, angle velocity (5 x 13)
+        137 - 139   right shadow hand base position
+        140 - 142   right shadow hand base rotation
+        143 - 168   right shadow hand actions
+        169 - 192   left shadow hand dof position
+        193 - 216   left shadow hand dof velocity
+        217 - 240   left shadow hand dof force
+        241 - 305   left shadow hand fingertip pose, linear velocity, angle velocity (5 x 13)
+        306 - 308   left shadow hand base position
+        309 - 311   left shadow hand base rotation
+        312 - 337   left shadow hand actions
+        """
+        num_ft_states = 13 * int(self.num_fingertips / 2)  # 65
+
+        self.obs_buf[:, 0:self.num_shadow_hand_dofs] = unscale(self.shadow_hand_dof_pos,
+                                                            self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
+        self.obs_buf[:, self.num_shadow_hand_dofs:2*self.num_shadow_hand_dofs] = self.vel_obs_scale * self.shadow_hand_dof_vel
+        self.obs_buf[:, 2*self.num_shadow_hand_dofs:3*self.num_shadow_hand_dofs] = self.force_torque_obs_scale * self.dof_force_tensor[:, :24]
+
+        fingertip_obs_start = 72
+        self.obs_buf[:, fingertip_obs_start:fingertip_obs_start + num_ft_states] = self.fingertip_state.reshape(self.num_envs, num_ft_states)
+        # (fingertip force/torque intentionally omitted here -- this is the "P" arm)
+
+        hand_pose_start = fingertip_obs_start + num_ft_states
+        self.obs_buf[:, hand_pose_start:hand_pose_start + 3] = self.right_hand_pos
+        self.obs_buf[:, hand_pose_start+3:hand_pose_start+4] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[0].unsqueeze(-1)
+        self.obs_buf[:, hand_pose_start+4:hand_pose_start+5] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[1].unsqueeze(-1)
+        self.obs_buf[:, hand_pose_start+5:hand_pose_start+6] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[2].unsqueeze(-1)
+
+        action_obs_start = hand_pose_start + 6
+        self.obs_buf[:, action_obs_start:action_obs_start + 26] = self.actions[:, :26]
+
+        # another_hand
+        another_hand_start = action_obs_start + 26
+        self.obs_buf[:, another_hand_start:self.num_shadow_hand_dofs + another_hand_start] = unscale(self.shadow_hand_another_dof_pos,
+                                                            self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
+        self.obs_buf[:, self.num_shadow_hand_dofs + another_hand_start:2*self.num_shadow_hand_dofs + another_hand_start] = self.vel_obs_scale * self.shadow_hand_another_dof_vel
+        self.obs_buf[:, 2*self.num_shadow_hand_dofs + another_hand_start:3*self.num_shadow_hand_dofs + another_hand_start] = self.force_torque_obs_scale * self.dof_force_tensor[:, 24:48]
+
+        fingertip_another_obs_start = another_hand_start + 72
+        self.obs_buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
+        # (fingertip force/torque intentionally omitted here -- this is the "P" arm)
+
+        hand_another_pose_start = fingertip_another_obs_start + num_ft_states
+        self.obs_buf[:, hand_another_pose_start:hand_another_pose_start + 3] = self.left_hand_pos
+        self.obs_buf[:, hand_another_pose_start+3:hand_another_pose_start+4] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[0].unsqueeze(-1)
+        self.obs_buf[:, hand_another_pose_start+4:hand_another_pose_start+5] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[1].unsqueeze(-1)
+        self.obs_buf[:, hand_another_pose_start+5:hand_another_pose_start+6] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[2].unsqueeze(-1)
+
+        action_another_obs_start = hand_another_pose_start + 6
+        self.obs_buf[:, action_another_obs_start:action_another_obs_start + 26] = self.actions[:, 26:]
+        # (object/scissors tail intentionally omitted entirely -- not proprioception)
 
     def compute_full_state(self, asymm_obs=False):
         """
