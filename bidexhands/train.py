@@ -56,7 +56,14 @@ def train():
     if args.max_iterations > 0:
         iterations = args.max_iterations
 
-    runner.train(train_epoch=iterations) if args.algo in META_ALGOS else \
+    if algo == "sarl" and args.algo == "ppo" and args.model_dir != "":
+        # Held-out eval of a loaded checkpoint (deterministic, bounded episode count) --
+        # mirrors the MARL runner.eval(1000) branch above; PPO's own run() test-mode loop
+        # is an unbounded visualization loop with no success accounting, see runner.eval.
+        runner.eval(num_episodes=100)
+    elif args.algo in META_ALGOS:
+        runner.train(train_epoch=iterations)
+    else:
         runner.run(num_learning_iterations=iterations, log_interval=cfg_train["learn"]["save_interval"])
         
 if __name__ == '__main__':

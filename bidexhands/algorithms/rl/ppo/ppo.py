@@ -96,6 +96,29 @@ class PPO:
     def save(self, path):
         torch.save(self.actor_critic.state_dict(), path)
 
+    def eval(self, num_episodes=100):
+        """
+        Held-out eval for a loaded checkpoint (call after self.test(path)): deterministic
+        act_inference, bounded to num_episodes, reads task.extras['consecutive_successes']
+        at the reset step each episode completes -- same convention compute_hand_reward
+        already uses for the in-training "Mean episode consecutive_successes" stat, just
+        bounded and free of on-policy exploration noise instead of an unbounded loop.
+        """
+        current_obs = self.vec_env.reset()
+        successes = []
+        with torch.no_grad():
+            while len(successes) < num_episodes:
+                actions = self.actor_critic.act_inference(current_obs)
+                next_obs, rews, dones, infos = self.vec_env.step(actions)
+                current_obs.copy_(next_obs)
+                done_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
+                if done_ids.numel() > 0 and isinstance(infos, dict) and 'consecutive_successes' in infos:
+                    successes.extend(infos['consecutive_successes'][done_ids].cpu().tolist())
+        successes = successes[:num_episodes]
+        mean_success = 100.0 * sum(successes) / len(successes) if successes else float('nan')
+        print(f"Held-out eval over {len(successes)} episodes: mean success rate = {mean_success:.2f}%")
+        return mean_success, successes
+
     def run(self, num_learning_iterations, log_interval=1):
         current_obs = self.vec_env.reset()
         current_states = self.vec_env.get_state()
