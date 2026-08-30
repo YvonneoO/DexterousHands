@@ -238,6 +238,17 @@ def main():
     ap.add_argument("--seed", type=int, default=0,
                      help="weight init / dataloader shuffling only -- episode "
                           "selection comes from --manifest, not this")
+    ap.add_argument("--ckpt_every", type=int, default=5,
+                     help="save a numbered epoch_XXX.pt checkpoint every N epochs "
+                          "(plus the last epoch) for sweep_eval_bc_student.py's "
+                          "success-rate-vs-epoch curve")
+    ap.add_argument("--wandb_project", default="ego2contact-bc-distill")
+    ap.add_argument("--wandb_group", default=None,
+                     help="defaults to the manifest's task name -- groups the three "
+                          "arms of one task together in the wandb UI")
+    ap.add_argument("--wandb_run_name", default=None,
+                     help="defaults to '<task>_<tac_mode>'")
+    ap.add_argument("--no_wandb", action="store_true")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -267,6 +278,23 @@ def main():
     model = BCStudent(prop_dim, tac_dim, action_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    task_name = manifest.get("task", "unknown_task")
+    wandb_run = None
+    if not args.no_wandb:
+        try:
+            import wandb
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                group=args.wandb_group or task_name,
+                name=args.wandb_run_name or f"{task_name}_{args.tac_mode}",
+                config={**vars(args), "task": task_name,
+                        "prop_dim": prop_dim, "tac_dim": tac_dim, "action_dim": action_dim},
+            )
+            with open(os.path.join(args.out, "wandb_run_id.txt"), "w") as f:
+                f.write(wandb_run.id)
+        except ImportError:
+            print("[wandb] not installed -- skipping logging", flush=True)
+
     best_val = float("inf")
     history = []
     for epoch in range(args.epochs):
@@ -274,6 +302,8 @@ def main():
         val_loss = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
         print(f"[epoch {epoch:3d}] train_mse={train_loss:.5f}  val_mse={val_loss:.5f}", flush=True)
+        if wandb_run is not None:
+            wandb_run.log({"epoch": epoch, "train_mse": train_loss, "val_mse": val_loss})
 
         ckpt = {
             "model": model.state_dict(),
@@ -284,9 +314,15 @@ def main():
             best_val = val_loss
             torch.save(ckpt, os.path.join(args.out, "best_model.pt"))
         torch.save(ckpt, os.path.join(args.out, "last_model.pt"))
+        is_last = epoch == args.epochs - 1
+        if is_last or (epoch + 1) % args.ckpt_every == 0:
+            torch.save(ckpt, os.path.join(args.out, f"epoch_{epoch + 1:03d}.pt"))
 
     with open(os.path.join(args.out, "history.json"), "w") as f:
         json.dump(history, f, indent=2)
+
+    if wandb_run is not None:
+        wandb_run.finish()  # sweep_eval_bc_student.py resumes this same run id later
 
 
 if __name__ == "__main__":
