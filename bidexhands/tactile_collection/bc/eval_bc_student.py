@@ -25,9 +25,13 @@ Not yet run anywhere -- local draft only.
 import argparse
 import json
 
+# rollout_eval_core pulls in isaacgym via bidexhands.utils.config; that must
+# happen before `import torch` runs anywhere in the process, so it's imported
+# first here even though torch is used below.
+from tactile_collection.bc.rollout_eval_core import build_eval_context, run_rollout_eval
+
 import torch
 
-from tactile_collection.bc.rollout_eval_core import build_eval_context, run_rollout_eval
 from tactile_collection.bc.train_bc_student import BCStudent
 
 

@@ -15,10 +15,11 @@ import os
 import sys
 
 import numpy as np
-import torch
 from PIL import Image
 
-# Isaac Gym must be imported before torch; bidexhands.utils.config does that.
+# Isaac Gym must be imported before torch anywhere in the process (it raises
+# ImportError otherwise) -- these bidexhands imports pull in isaacgym, so
+# `import torch` below MUST stay after them, not just after this comment.
 from bidexhands.utils.config import get_args, load_cfg, parse_sim_params, set_np_formatting, set_seed
 from bidexhands.utils.parse_task import parse_task
 from bidexhands.utils.process_marl import get_AgentIndex
@@ -28,6 +29,8 @@ from tactile_collection.rollout_tactile_rgb_chest import (
     as_numpy, env0, native_success, create_camera, position_camera,
     hide_goal_object_for_render, restore_goal_object_after_render,
 )
+
+import torch
 from tactile_collection.bc.train_bc_student import PROP_KEYS
 
 
