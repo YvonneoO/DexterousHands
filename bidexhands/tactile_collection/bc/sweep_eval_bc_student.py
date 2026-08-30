@@ -71,6 +71,11 @@ def main():
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--wandb_project", default="ego2contact-bc-distill")
     args, unknown = ap.parse_known_args()
+    # parse_known_args leaves a literal "--" separator in `unknown` if the
+    # caller passed one to mark where bidexhands' own args start; bidexhands'
+    # parser doesn't handle a bare "--" and rejects everything after it.
+    if unknown and unknown[0] == "--":
+        unknown = unknown[1:]
 
     ckpts = epoch_checkpoints(args.ckpt_dir)
     if not ckpts:

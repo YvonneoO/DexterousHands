@@ -48,6 +48,11 @@ def main():
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--out", default=None, help="optional json path for per-episode results")
     args, unknown = ap.parse_known_args()
+    # parse_known_args leaves a literal "--" separator in `unknown` if the
+    # caller passed one to mark where bidexhands' own args start; bidexhands'
+    # parser doesn't handle a bare "--" and rejects everything after it.
+    if unknown and unknown[0] == "--":
+        unknown = unknown[1:]
 
     ckpt = torch.load(args.ckpt, map_location="cpu")
     tac_mode = ckpt["tac_mode"]
