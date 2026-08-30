@@ -166,8 +166,12 @@ def run_rollout_eval(ctx, model, tac_mode, img_size, action_dim, episodes):
                 env_forces = as_numpy(ctx.net_contact_forces[0])
                 left_pa, _, _ = ctx.left_mapper.project_net_forces(env_forces)
                 right_pa, _, _ = ctx.right_mapper.project_net_forces(env_forces)
-                tac = np.concatenate([left_pa.astype(np.float32).reshape(-1),
-                                       right_pa.astype(np.float32).reshape(-1)])
+                # NaN marks unmapped/non-sensor cells (distinct from a real
+                # zero-contact reading) -- sanitize before it hits the network,
+                # matching train_bc_student.py's BCEpisodeDataset.
+                left_pa = np.nan_to_num(left_pa.astype(np.float32), nan=0.0)
+                right_pa = np.nan_to_num(right_pa.astype(np.float32), nan=0.0)
+                tac = np.concatenate([left_pa.reshape(-1), right_pa.reshape(-1)])
                 tac_t = torch.from_numpy(tac).unsqueeze(0).to(device)
             else:
                 tac_t = torch.zeros(1, 0, device=device)

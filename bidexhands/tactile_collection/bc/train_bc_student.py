@@ -135,8 +135,15 @@ class BCEpisodeDataset(Dataset):
         action = torch.from_numpy(np.asarray(traj["actions"][row], dtype=np.float32))
 
         if self.tac_mode == "gt":
-            left = np.asarray(press["left_pressure_grid"][row], dtype=np.float32).reshape(-1)
-            right = np.asarray(press["right_pressure_grid"][row], dtype=np.float32).reshape(-1)
+            # left/right_pressure_grid use NaN to mark unmapped/non-sensor cells
+            # (distinct from a real zero-contact reading) -- must be sanitized
+            # before hitting the network, or it poisons the whole forward pass.
+            left = np.nan_to_num(
+                np.asarray(press["left_pressure_grid"][row], dtype=np.float32), nan=0.0
+            ).reshape(-1)
+            right = np.nan_to_num(
+                np.asarray(press["right_pressure_grid"][row], dtype=np.float32), nan=0.0
+            ).reshape(-1)
             tac = torch.from_numpy(np.concatenate([left, right]))
         else:
             tac = torch.zeros(0, dtype=torch.float32)
