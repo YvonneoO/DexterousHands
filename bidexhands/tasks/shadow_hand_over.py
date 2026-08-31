@@ -83,6 +83,15 @@ class ShadowHandOver(BaseTask):
         self.vel_obs_scale = 0.2  # scale factor of velocity based observations
         self.force_torque_obs_scale = 10.0  # scale factor of velocity based observations
 
+        # Tactile-SR ablation "P+GT-tactile" arm: SEPARATE scale for the new
+        # per-link extra-tactile channel -- empirically verified (on Pen) that
+        # these links' raw force magnitude is ~18x larger than the existing
+        # fingertip channel's, and this pipeline has no adaptive observation
+        # normalization (only a static +-5.0 clamp), so reusing
+        # force_torque_obs_scale directly would saturate the clamp. 0.1 brings
+        # the typical magnitude to ~O(1) post-scale.
+        self.tactile_extra_obs_scale = 0.1
+
         self.reset_position_noise = self.cfg["env"]["resetPositionNoise"]
         self.reset_rotation_noise = self.cfg["env"]["resetRotationNoise"]
         self.reset_dof_pos_noise = self.cfg["env"]["resetDofPosRandomInterval"]
@@ -125,9 +134,9 @@ class ShadowHandOver(BaseTask):
         # can be "openai", "full_no_vel", "full", "full_state"
         self.obs_type = self.cfg["env"]["observationType"]
 
-        if not (self.obs_type in ["point_cloud", "full_state"]):
+        if not (self.obs_type in ["point_cloud", "full_state", "proprio_gttac"]):
             raise Exception(
-                "Unknown type of observations!\nobservationType should be one of: [point_cloud, full_state]")
+                "Unknown type of observations!\nobservationType should be one of: [point_cloud, full_state, proprio_gttac]")
 
         print("Obs type:", self.obs_type)
 
@@ -135,7 +144,14 @@ class ShadowHandOver(BaseTask):
         self.num_obs_dict = {
             "point_cloud": 398 + self.num_point_cloud_feature_dim * 3,
             "point_cloud_for_distill": 398 + self.num_point_cloud_feature_dim * 3,
-            "full_state": 398
+            "full_state": 398,
+            # tactile-SR ablation "P+GT-tactile" arm: dof+fingertip-pose+actions
+            # (dropping raw fingertip force-torque AND the object/goal tail --
+            # Over has no existing "proprio_only" variant to derive this from,
+            # so this subset was hand-derived from compute_full_state's actual
+            # code offsets, not its docstring which is stale) plus a 12-link/hand
+            # coarse-tactile channel (force magnitude only). See compute_proprio_gttac_state.
+            "proprio_gttac": 338,
         }
         
         self.num_hand_obs = 72 + 95 + 20
@@ -147,6 +163,28 @@ class ShadowHandOver(BaseTask):
         self.hand_center = ["robot1:palm"]
 
         self.num_fingertips = len(self.fingertips) * 2
+
+        # Tactile-SR ablation "P+GT-tactile" arm: the 12 links per hand NOT already
+        # covered by self.fingertips (5 x distal), matching the same 17-anatomical-
+        # group partition egotouch_taxels.py uses for the 217-taxel grid -- middle/
+        # proximal per finger, thumb's middle/proximal, palm, lfmetacarpal.
+        self.tactile_extra_links = [
+            "robot0:ffmiddle", "robot0:ffproximal",
+            "robot0:mfmiddle", "robot0:mfproximal",
+            "robot0:rfmiddle", "robot0:rfproximal",
+            "robot0:lfmiddle", "robot0:lfproximal",
+            "robot0:thmiddle", "robot0:thproximal",
+            "robot0:palm", "robot0:lfmetacarpal",
+        ]
+        self.a_tactile_extra_links = [
+            "robot1:ffmiddle", "robot1:ffproximal",
+            "robot1:mfmiddle", "robot1:mfproximal",
+            "robot1:rfmiddle", "robot1:rfproximal",
+            "robot1:lfmiddle", "robot1:lfproximal",
+            "robot1:thmiddle", "robot1:thproximal",
+            "robot1:palm", "robot1:lfmetacarpal",
+        ]
+        self.num_tactile_extra = len(self.tactile_extra_links)  # 12
 
         self.use_vel_obs = False
         self.fingertip_obs = True
@@ -191,7 +229,8 @@ class ShadowHandOver(BaseTask):
         rigid_body_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
 
         sensor_tensor = self.gym.acquire_force_sensor_tensor(self.sim)
-        self.vec_sensor_tensor = gymtorch.wrap_tensor(sensor_tensor).view(self.num_envs, self.num_fingertips * 6)
+        self.vec_sensor_tensor = gymtorch.wrap_tensor(sensor_tensor).view(
+            self.num_envs, (self.num_fingertips + 2 * self.num_tactile_extra) * 6)
 
         dof_force_tensor = self.gym.acquire_dof_force_tensor(self.sim)
         self.dof_force_tensor = gymtorch.wrap_tensor(dof_force_tensor).view(self.num_envs, self.num_shadow_hand_dofs * 2)
@@ -410,7 +449,24 @@ class ShadowHandOver(BaseTask):
             self.gym.create_asset_force_sensor(shadow_hand_asset, ft_handle, sensor_pose)
         for ft_a_handle in self.fingertip_another_handles:
             self.gym.create_asset_force_sensor(shadow_hand_another_asset, ft_a_handle, sensor_pose)
-        
+
+        # Tactile-SR ablation "P+GT-tactile" arm: extra per-link force sensors.
+        # ASSUMED layout: [right hand: 5 fingertip + 12 extra = 17][left hand: 5 fingertip + 12 extra = 17]
+        self.tactile_extra_handles = [
+            self.gym.find_asset_rigid_body_index(shadow_hand_asset, name) for name in self.tactile_extra_links
+        ]
+        self.tactile_extra_another_handles = [
+            self.gym.find_asset_rigid_body_index(shadow_hand_another_asset, name) for name in self.a_tactile_extra_links
+        ]
+        assert all(h >= 0 for h in self.tactile_extra_handles), \
+            "one of self.tactile_extra_links did not resolve to a rigid body in shadow_hand_asset"
+        assert all(h >= 0 for h in self.tactile_extra_another_handles), \
+            "one of self.a_tactile_extra_links did not resolve to a rigid body in shadow_hand_another_asset"
+        for h in self.tactile_extra_handles:
+            self.gym.create_asset_force_sensor(shadow_hand_asset, h, sensor_pose)
+        for h in self.tactile_extra_another_handles:
+            self.gym.create_asset_force_sensor(shadow_hand_another_asset, h, sensor_pose)
+
         if self.obs_type in ["point_cloud"]:
             self.cameras = []
             self.camera_tensors = []
@@ -621,14 +677,74 @@ class ShadowHandOver(BaseTask):
             self.compute_full_state()
         elif self.obs_type == "point_cloud":
             self.compute_point_cloud_observation()
+        elif self.obs_type == "proprio_gttac":
+            self.compute_proprio_gttac_state()
 
         if self.asymmetric_obs:
             self.compute_full_state(True)
 
+    def compute_proprio_gttac_state(self):
+        """
+        Tactile-SR ablation "P+GT-tactile" arm for ShadowHandOver: dof pos/vel/
+        force + fingertip pose/vel (NOT raw force-torque) + actions, matching
+        the per-hand structure of compute_full_state minus the raw fingertip
+        F/T and the object/goal tail (Over has no existing "proprio_only" to
+        mirror, so this subset was hand-derived from compute_full_state's
+        actual runtime offsets). A 12-link/hand coarse-tactile channel (force
+        magnitude only, tactile_extra_links) is added in place of the dropped
+        raw F/T, scaled by tactile_extra_obs_scale. NOTE: unlike Pen/Scissors/
+        Door, there is no hand base position/rotation block here -- Over's own
+        compute_full_state doesn't write one either. 338-dimensional layout:
+
+        Index       Description
+        0 - 23      right shadow hand dof position
+        24 - 47     right shadow hand dof velocity
+        48 - 71     right shadow hand dof force
+        72 - 136    right shadow hand fingertip pose, linear velocity, angle velocity (5 x 13)
+        137 - 148   right hand per-link tactile (12 links, force magnitude only)
+        149 - 168   right shadow hand actions (20)
+        169 - 192   left shadow hand dof position
+        ... (mirror of the above for the left hand, shifted by 169)
+        """
+        num_ft_states = 13 * int(self.num_fingertips / 2)  # 65
+
+        self.obs_buf[:, 0:self.num_shadow_hand_dofs] = unscale(self.shadow_hand_dof_pos,
+                                                            self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
+        self.obs_buf[:, self.num_shadow_hand_dofs:2*self.num_shadow_hand_dofs] = self.vel_obs_scale * self.shadow_hand_dof_vel
+        self.obs_buf[:, 2*self.num_shadow_hand_dofs:3*self.num_shadow_hand_dofs] = self.force_torque_obs_scale * self.dof_force_tensor[:, :24]
+
+        fingertip_obs_start = 72
+        self.obs_buf[:, fingertip_obs_start:fingertip_obs_start + num_ft_states] = self.fingertip_state.reshape(self.num_envs, num_ft_states)
+
+        tactile_obs_start = fingertip_obs_start + num_ft_states
+        right_extra_forces = self.vec_sensor_tensor[:, 30:102].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
+        self.obs_buf[:, tactile_obs_start:tactile_obs_start + self.num_tactile_extra] = \
+            self.tactile_extra_obs_scale * torch.norm(right_extra_forces, dim=-1)
+
+        action_obs_start = tactile_obs_start + self.num_tactile_extra
+        self.obs_buf[:, action_obs_start:action_obs_start + 20] = self.actions[:, :20]
+
+        another_hand_start = action_obs_start + 20
+        self.obs_buf[:, another_hand_start:self.num_shadow_hand_dofs + another_hand_start] = unscale(self.shadow_hand_another_dof_pos,
+                                                            self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
+        self.obs_buf[:, self.num_shadow_hand_dofs + another_hand_start:2*self.num_shadow_hand_dofs + another_hand_start] = self.vel_obs_scale * self.shadow_hand_another_dof_vel
+        self.obs_buf[:, 2*self.num_shadow_hand_dofs + another_hand_start:3*self.num_shadow_hand_dofs + another_hand_start] = self.force_torque_obs_scale * self.dof_force_tensor[:, 24:48]
+
+        fingertip_another_obs_start = another_hand_start + 72
+        self.obs_buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
+
+        tactile_another_obs_start = fingertip_another_obs_start + num_ft_states
+        left_extra_forces = self.vec_sensor_tensor[:, 132:204].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
+        self.obs_buf[:, tactile_another_obs_start:tactile_another_obs_start + self.num_tactile_extra] = \
+            self.tactile_extra_obs_scale * torch.norm(left_extra_forces, dim=-1)
+
+        action_another_obs_start = tactile_another_obs_start + self.num_tactile_extra
+        self.obs_buf[:, action_another_obs_start:action_another_obs_start + 20] = self.actions[:, 20:]
+
     def compute_full_state(self, asymm_obs=False):
         """
-        Compute the observations of all environment. The observation is composed of three parts: 
-        the state values of the left and right hands, and the information of objects and target. 
+        Compute the observations of all environment. The observation is composed of three parts:
+        the state values of the left and right hands, and the information of objects and target.
         The state values of the left and right hands were the same for each task, including hand 
         joint and finger positions, velocity, and force information. The detail 422-dimensional 
         observational space as shown in below:
@@ -683,7 +799,7 @@ class ShadowHandOver(BaseTask):
         fingertip_another_obs_start = another_hand_start + 72
         self.obs_buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
         self.obs_buf[:, fingertip_another_obs_start + num_ft_states:fingertip_another_obs_start + num_ft_states +
-                    num_ft_force_torques] = self.force_torque_obs_scale * self.vec_sensor_tensor[:, 30:]
+                    num_ft_force_torques] = self.force_torque_obs_scale * self.vec_sensor_tensor[:, 102:132]  # left-hand fingertip F/T, moved from [:,30:] once tactile_extra_links were added -- see acquisition comment
 
         action_another_obs_start = fingertip_another_obs_start + 95
         self.obs_buf[:, action_another_obs_start:action_another_obs_start + 20] = self.actions[:, 20:]
@@ -754,7 +870,7 @@ class ShadowHandOver(BaseTask):
         fingertip_another_obs_start = another_hand_start + 72
         self.obs_buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
         self.obs_buf[:, fingertip_another_obs_start + num_ft_states:fingertip_another_obs_start + num_ft_states +
-                    num_ft_force_torques] = self.force_torque_obs_scale * self.vec_sensor_tensor[:, 30:]
+                    num_ft_force_torques] = self.force_torque_obs_scale * self.vec_sensor_tensor[:, 102:132]  # left-hand fingertip F/T, moved from [:,30:] once tactile_extra_links were added -- see acquisition comment
 
         action_another_obs_start = fingertip_another_obs_start + 95
         self.obs_buf[:, action_another_obs_start:action_another_obs_start + 20] = self.actions[:, 20:]
