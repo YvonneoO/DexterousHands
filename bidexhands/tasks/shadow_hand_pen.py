@@ -79,6 +79,23 @@ class ShadowHandPen(BaseTask):
 
         self.vel_obs_scale = 0.2  # scale factor of velocity based observations
         self.force_torque_obs_scale = 10.0  # scale factor of velocity based observations
+        # Tactile-SR ablation "P+GT-tactile" arm: SEPARATE scale for the new
+        # per-link extra-tactile channel -- verified empirically (random-action
+        # rollout, see verify_sensor_ordering.py) that these links' raw force
+        # magnitude (mean ~10.8, max ~285) is ~18x larger than the existing
+        # fingertip channel's (mean ~0.6, max ~10.9), most likely because the
+        # extra set includes large-area links (palm) that see bigger contact
+        # forces than the small fingertip pads. Reusing force_torque_obs_scale
+        # (10.0) directly would push most of this channel's signal past the
+        # pipeline's static +-5.0 observation clamp (vec_task.py) -- same
+        # failure mode as the unnormalized-tactile bug in the separate BC
+        # pipeline (see Ego2Contact/docs/sim_data_collection_pipeline.html sec
+        # 17-18), just less extreme. 0.1 brings the typical (mean) value to
+        # ~1.0 post-scale; not a from-data percentile calibration (no offline
+        # dataset of raw per-link force exists to calibrate against, unlike
+        # pressure_grids.npz for the BC arm) -- watch the first real training
+        # run's raw values and adjust if they still saturate the clamp often.
+        self.tactile_extra_obs_scale = 0.1
 
         self.reset_position_noise = self.cfg["env"]["resetPositionNoise"]
         self.reset_rotation_noise = self.cfg["env"]["resetRotationNoise"]
@@ -971,7 +988,7 @@ class ShadowHandPen(BaseTask):
         tactile_obs_start = fingertip_obs_start + num_ft_states
         right_extra_forces = self.vec_sensor_tensor[:, 30:102].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
         self.obs_buf[:, tactile_obs_start:tactile_obs_start + self.num_tactile_extra] = \
-            self.force_torque_obs_scale * torch.norm(right_extra_forces, dim=-1)
+            self.tactile_extra_obs_scale * torch.norm(right_extra_forces, dim=-1)
 
         hand_pose_start = tactile_obs_start + self.num_tactile_extra
         self.obs_buf[:, hand_pose_start:hand_pose_start + 3] = self.right_hand_pos
@@ -995,7 +1012,7 @@ class ShadowHandPen(BaseTask):
         tactile_another_obs_start = fingertip_another_obs_start + num_ft_states
         left_extra_forces = self.vec_sensor_tensor[:, 132:204].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
         self.obs_buf[:, tactile_another_obs_start:tactile_another_obs_start + self.num_tactile_extra] = \
-            self.force_torque_obs_scale * torch.norm(left_extra_forces, dim=-1)
+            self.tactile_extra_obs_scale * torch.norm(left_extra_forces, dim=-1)
 
         hand_another_pose_start = tactile_another_obs_start + self.num_tactile_extra
         self.obs_buf[:, hand_another_pose_start:hand_another_pose_start + 3] = self.left_hand_pos
