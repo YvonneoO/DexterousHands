@@ -197,7 +197,13 @@ class BCStudent(nn.Module):
         for h in hidden:
             layers += [nn.Linear(d, h), nn.ReLU(inplace=True)]
             d = h
-        layers += [nn.Linear(d, action_dim), nn.Tanh()]  # teacher actions live in [-1, 1]
+        # No final activation: act_inference() returns the RAW, UNCLIPPED
+        # Gaussian policy mean (confirmed from real logged actions exceeding
+        # +-4 in magnitude) -- the env clips to its Box(-1,1) action space
+        # internally at step() time, the logged/target actions are not
+        # pre-clipped. A Tanh here would structurally cap predictions at
+        # +-1, guaranteeing it can never match targets beyond that range.
+        layers += [nn.Linear(d, action_dim)]
         self.actor = nn.Sequential(*layers)
 
     def forward(self, img, prop, tac):
