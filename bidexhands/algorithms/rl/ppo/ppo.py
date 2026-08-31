@@ -99,10 +99,18 @@ class PPO:
     def eval(self, num_episodes=100):
         """
         Held-out eval for a loaded checkpoint (call after self.test(path)): deterministic
-        act_inference, bounded to num_episodes, reads task.extras['consecutive_successes']
-        at the reset step each episode completes -- same convention compute_hand_reward
-        already uses for the in-training "Mean episode consecutive_successes" stat, just
-        bounded and free of on-policy exploration noise instead of an unbounded loop.
+        act_inference, bounded to num_episodes, reads task.extras['successes'] at the
+        reset step each episode completes -- a per-env sticky 0/1 flag ("did this episode
+        ever hit the goal"), reset to 0 in each task's own reset_idx, so indexing it by
+        done_ids always gives one binary outcome per just-finished episode.
+
+        NOT task.extras['consecutive_successes']: that tensor is sized per-env
+        (torch.zeros(self.num_envs, ...)) for ShadowHandPen, but sized as a single
+        scalar (torch.zeros(1, ...), mean-reduced in compute_hand_reward) for
+        ShadowHandScissors/ShadowHandDoor*/ShadowHandOver -- indexing a size-1 tensor
+        with a multi-element done_ids raises a CUDA "index out of bounds" device-side
+        assert for every one of those tasks. 'successes' is per-env-sized consistently
+        across all of them (confirmed via grep), so it's the safe/universal choice.
         """
         current_obs = self.vec_env.reset()
         successes = []
@@ -112,8 +120,8 @@ class PPO:
                 next_obs, rews, dones, infos = self.vec_env.step(actions)
                 current_obs.copy_(next_obs)
                 done_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
-                if done_ids.numel() > 0 and isinstance(infos, dict) and 'consecutive_successes' in infos:
-                    successes.extend(infos['consecutive_successes'][done_ids].cpu().tolist())
+                if done_ids.numel() > 0 and isinstance(infos, dict) and 'successes' in infos:
+                    successes.extend(infos['successes'][done_ids].cpu().tolist())
         successes = successes[:num_episodes]
         mean_success = 100.0 * sum(successes) / len(successes) if successes else float('nan')
         print(f"Held-out eval over {len(successes)} episodes: mean success rate = {mean_success:.2f}%")
