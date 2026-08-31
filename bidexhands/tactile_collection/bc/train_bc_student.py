@@ -84,17 +84,47 @@ def _load_image(path, img_size):
     return torch.from_numpy(arr).permute(2, 0, 1).contiguous()  # (3,H,W)
 
 
+def compute_tac_vmax(manifest_entries, percentile=99.0):
+    """99th-percentile scale for GT-tactile normalization, computed from ONE
+    task's own training split (raw pressure reaches into the tens/hundreds of
+    thousands -- confirmed empirically for Pen: max ~222,724, nonzero mean
+    ~11,000 -- five to six orders of magnitude larger than vision ([0,1]) or
+    proprioception, which stalls training). Percentile-based (not z-score)
+    because the data is non-negative, sparse (~93% zero), and heavy-tailed --
+    matches the vmax convention already used elsewhere in this project's
+    other tactile-prediction pipeline, not a new scheme. Computed per-task,
+    NOT globally: different tasks' contact dynamics give different scales,
+    and reusing one task's vmax on another would just reintroduce the same
+    kind of scale mismatch this fixes.
+    """
+    values = []
+    for e in manifest_entries:
+        ep_dir = os.path.join(e["shard_dir"], "successful_episodes", e["episode"])
+        _, press = _load_episode(ep_dir)
+        left = np.nan_to_num(np.asarray(press["left_pressure_grid"], dtype=np.float32))
+        right = np.nan_to_num(np.asarray(press["right_pressure_grid"], dtype=np.float32))
+        values.append(left.reshape(-1))
+        values.append(right.reshape(-1))
+    all_values = np.concatenate(values)
+    vmax = float(np.percentile(all_values, percentile))
+    return max(vmax, 1e-6)  # guard against a degenerate all-zero episode set
+
+
 class BCEpisodeDataset(Dataset):
     """One sample per (episode, saved RGB frame).
 
     `manifest_entries` is a list of {"shard_dir": ..., "episode": ...} dicts,
     e.g. manifest["train"] or manifest["val"] from generate_episode_manifest.py.
+    `tac_vmax`: required when tac_mode=="gt" -- see compute_tac_vmax().
     """
 
-    def __init__(self, manifest_entries, tac_mode, img_size=224):
+    def __init__(self, manifest_entries, tac_mode, img_size=224, tac_vmax=None):
         assert tac_mode in ("none", "gt")
+        if tac_mode == "gt":
+            assert tac_vmax is not None, "tac_vmax is required when tac_mode='gt'"
         self.tac_mode = tac_mode
         self.img_size = img_size
+        self.tac_vmax = tac_vmax
 
         ep_dirs = [
             os.path.join(e["shard_dir"], "successful_episodes", e["episode"])
@@ -144,7 +174,11 @@ class BCEpisodeDataset(Dataset):
             right = np.nan_to_num(
                 np.asarray(press["right_pressure_grid"][row], dtype=np.float32), nan=0.0
             ).reshape(-1)
-            tac = torch.from_numpy(np.concatenate([left, right]))
+            tac_raw = np.concatenate([left, right])
+            # raw pressure reaches into the tens/hundreds of thousands -- scale
+            # to [0,1] against this task's own training-set vmax (see
+            # compute_tac_vmax) so it doesn't dwarf vision/proprioception.
+            tac = torch.from_numpy(np.clip(tac_raw / self.tac_vmax, 0.0, 1.0).astype(np.float32))
         else:
             tac = torch.zeros(0, dtype=torch.float32)
 
@@ -273,8 +307,13 @@ def main():
     print(f"[data] manifest task={manifest.get('task')} "
           f"{len(manifest['train'])} train episodes, {len(manifest['val'])} val episodes", flush=True)
 
-    train_ds = BCEpisodeDataset(manifest["train"], args.tac_mode, args.img_size)
-    val_ds = BCEpisodeDataset(manifest["val"], args.tac_mode, args.img_size)
+    tac_vmax = None
+    if args.tac_mode == "gt":
+        tac_vmax = compute_tac_vmax(manifest["train"])
+        print(f"[data] tac_vmax (99th pct, this task's train split) = {tac_vmax:.2f}", flush=True)
+
+    train_ds = BCEpisodeDataset(manifest["train"], args.tac_mode, args.img_size, tac_vmax)
+    val_ds = BCEpisodeDataset(manifest["val"], args.tac_mode, args.img_size, tac_vmax)
     print(f"[data] {len(train_ds)} train samples, {len(val_ds)} val samples", flush=True)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -321,7 +360,7 @@ def main():
         ckpt = {
             "model": model.state_dict(),
             "prop_dim": prop_dim, "tac_dim": tac_dim, "action_dim": action_dim,
-            "tac_mode": args.tac_mode, "args": vars(args),
+            "tac_mode": args.tac_mode, "tac_vmax": tac_vmax, "args": vars(args),
         }
         if val_loss < best_val:
             best_val = val_loss

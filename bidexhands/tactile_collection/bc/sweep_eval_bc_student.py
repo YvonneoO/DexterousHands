@@ -109,7 +109,8 @@ def main():
     for epoch, path in ckpts:
         ckpt = torch.load(path, map_location=ctx.device)
         model.load_state_dict(ckpt["model"])
-        sr, _ = run_rollout_eval(ctx, model, tac_mode, img_size, action_dim, args.episodes_per_ckpt)
+        sr, _ = run_rollout_eval(ctx, model, tac_mode, img_size, action_dim, args.episodes_per_ckpt,
+                                  tac_vmax=ckpt.get("tac_vmax"))
         print(f"[sweep] epoch={epoch:4d}  quick_SR({args.episodes_per_ckpt} eps)={sr:.3f}", flush=True)
         if run is not None:
             wandb.log({"epoch": epoch, "success_rate": sr})
@@ -117,7 +118,8 @@ def main():
     ckpt = torch.load(last_ckpt_path, map_location=ctx.device)
     model.load_state_dict(ckpt["model"])
     final_sr, final_results = run_rollout_eval(
-        ctx, model, tac_mode, img_size, action_dim, args.final_episodes
+        ctx, model, tac_mode, img_size, action_dim, args.final_episodes,
+        tac_vmax=ckpt.get("tac_vmax"),
     )
     print(f"[sweep] FINAL epoch={last_epoch}  SR({args.final_episodes} eps)={final_sr:.4f}", flush=True)
     if run is not None:

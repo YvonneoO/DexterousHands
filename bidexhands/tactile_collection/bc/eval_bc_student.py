@@ -67,7 +67,8 @@ def main():
     print(f"[ckpt] tac_mode={tac_mode} prop_dim={ckpt['prop_dim']} "
           f"tac_dim={ckpt['tac_dim']} action_dim={ckpt['action_dim']} img_size={img_size}", flush=True)
 
-    sr, results = run_rollout_eval(ctx, model, tac_mode, img_size, ckpt["action_dim"], args.episodes)
+    sr, results = run_rollout_eval(ctx, model, tac_mode, img_size, ckpt["action_dim"], args.episodes,
+                                    tac_vmax=ckpt.get("tac_vmax"))
     for r in results:
         print(f"[eval] episode {r['episode']}/{args.episodes}  steps={r['steps']}  "
               f"success={r['success']}", flush=True)

@@ -137,7 +137,7 @@ def build_eval_context(bidex_argv, seed, camera_eye_offset, camera_target_offset
                         frame_stride, max_steps_per_episode)
 
 
-def run_rollout_eval(ctx, model, tac_mode, img_size, action_dim, episodes):
+def run_rollout_eval(ctx, model, tac_mode, img_size, action_dim, episodes, tac_vmax=None):
     """Roll out `model` for `episodes` fresh episodes in ctx.env. The student
     is queried and its action refreshed only every ctx.frame_stride steps,
     held (zero-order) in between -- the only cadence it's ever been trained
@@ -172,6 +172,11 @@ def run_rollout_eval(ctx, model, tac_mode, img_size, action_dim, episodes):
                 left_pa = np.nan_to_num(left_pa.astype(np.float32), nan=0.0)
                 right_pa = np.nan_to_num(right_pa.astype(np.float32), nan=0.0)
                 tac = np.concatenate([left_pa.reshape(-1), right_pa.reshape(-1)])
+                # raw pressure reaches into the tens/hundreds of thousands --
+                # scale against the SAME per-task vmax training used (from the
+                # checkpoint), matching train_bc_student.py's BCEpisodeDataset.
+                assert tac_vmax is not None, "tac_vmax is required when tac_mode='gt'"
+                tac = np.clip(tac / tac_vmax, 0.0, 1.0).astype(np.float32)
                 tac_t = torch.from_numpy(tac).unsqueeze(0).to(device)
             else:
                 tac_t = torch.zeros(1, 0, device=device)
