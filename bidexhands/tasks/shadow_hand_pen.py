@@ -128,9 +128,10 @@ class ShadowHandPen(BaseTask):
         # can be "openai", "full_no_vel", "full", "full_state"
         self.obs_type = self.cfg["env"]["observationType"]
 
-        if not (self.obs_type in ["point_cloud", "full_state", "proprio_only"]):
+        if not (self.obs_type in ["point_cloud", "full_state", "proprio_only", "proprio_gttac"]):
             raise Exception(
-                "Unknown type of observations!\nobservationType should be one of: [point_cloud, full_state, proprio_only]")
+                "Unknown type of observations!\nobservationType should be one of: "
+                "[point_cloud, full_state, proprio_only, proprio_gttac]")
 
         print("Obs type:", self.obs_type)
 
