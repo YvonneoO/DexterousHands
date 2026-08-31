@@ -134,9 +134,9 @@ class ShadowHandOver(BaseTask):
         # can be "openai", "full_no_vel", "full", "full_state"
         self.obs_type = self.cfg["env"]["observationType"]
 
-        if not (self.obs_type in ["point_cloud", "full_state", "proprio_gttac"]):
+        if not (self.obs_type in ["point_cloud", "full_state", "proprio_gttac", "proprio_only"]):
             raise Exception(
-                "Unknown type of observations!\nobservationType should be one of: [point_cloud, full_state, proprio_gttac]")
+                "Unknown type of observations!\nobservationType should be one of: [point_cloud, full_state, proprio_gttac, proprio_only]")
 
         print("Obs type:", self.obs_type)
 
@@ -152,6 +152,11 @@ class ShadowHandOver(BaseTask):
             # code offsets, not its docstring which is stale) plus a 12-link/hand
             # coarse-tactile channel (force magnitude only). See compute_proprio_gttac_state.
             "proprio_gttac": 338,
+            # tactile-SR ablation "P-only" arm: dof+fingertip-pose+actions only
+            # (drops raw fingertip force-torque AND the object/goal tail, no
+            # tactile channel at all -- proprio_gttac's structure minus its
+            # 12-link/hand tactile block). See compute_proprio_only_state.
+            "proprio_only": 314,
         }
         
         self.num_hand_obs = 72 + 95 + 20
@@ -679,9 +684,53 @@ class ShadowHandOver(BaseTask):
             self.compute_point_cloud_observation()
         elif self.obs_type == "proprio_gttac":
             self.compute_proprio_gttac_state()
+        elif self.obs_type == "proprio_only":
+            self.compute_proprio_only_state()
 
         if self.asymmetric_obs:
             self.compute_full_state(True)
+
+    def compute_proprio_only_state(self):
+        """
+        Tactile-SR ablation "P-only" arm for ShadowHandOver: dof pos/vel/force +
+        fingertip pose/vel (NOT raw force-torque) + actions -- same subset
+        compute_proprio_gttac_state uses, minus its 12-link/hand tactile block.
+        No hand base position/rotation block (Over's own compute_full_state
+        doesn't write one either). 314-dimensional layout:
+
+        Index       Description
+        0 - 23      right shadow hand dof position
+        24 - 47     right shadow hand dof velocity
+        48 - 71     right shadow hand dof force
+        72 - 136    right shadow hand fingertip pose, linear velocity, angle velocity (5 x 13)
+        137 - 156   right shadow hand actions (20)
+        157 - 180   left shadow hand dof position
+        ... (mirror of the above for the left hand, shifted by 157)
+        """
+        num_ft_states = 13 * int(self.num_fingertips / 2)  # 65
+
+        self.obs_buf[:, 0:self.num_shadow_hand_dofs] = unscale(self.shadow_hand_dof_pos,
+                                                            self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
+        self.obs_buf[:, self.num_shadow_hand_dofs:2*self.num_shadow_hand_dofs] = self.vel_obs_scale * self.shadow_hand_dof_vel
+        self.obs_buf[:, 2*self.num_shadow_hand_dofs:3*self.num_shadow_hand_dofs] = self.force_torque_obs_scale * self.dof_force_tensor[:, :24]
+
+        fingertip_obs_start = 72
+        self.obs_buf[:, fingertip_obs_start:fingertip_obs_start + num_ft_states] = self.fingertip_state.reshape(self.num_envs, num_ft_states)
+
+        action_obs_start = fingertip_obs_start + num_ft_states
+        self.obs_buf[:, action_obs_start:action_obs_start + 20] = self.actions[:, :20]
+
+        another_hand_start = action_obs_start + 20
+        self.obs_buf[:, another_hand_start:self.num_shadow_hand_dofs + another_hand_start] = unscale(self.shadow_hand_another_dof_pos,
+                                                            self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
+        self.obs_buf[:, self.num_shadow_hand_dofs + another_hand_start:2*self.num_shadow_hand_dofs + another_hand_start] = self.vel_obs_scale * self.shadow_hand_another_dof_vel
+        self.obs_buf[:, 2*self.num_shadow_hand_dofs + another_hand_start:3*self.num_shadow_hand_dofs + another_hand_start] = self.force_torque_obs_scale * self.dof_force_tensor[:, 24:48]
+
+        fingertip_another_obs_start = another_hand_start + 72
+        self.obs_buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
+
+        action_another_obs_start = fingertip_another_obs_start + num_ft_states
+        self.obs_buf[:, action_another_obs_start:action_another_obs_start + 20] = self.actions[:, 20:]
 
     def compute_proprio_gttac_state(self):
         """
