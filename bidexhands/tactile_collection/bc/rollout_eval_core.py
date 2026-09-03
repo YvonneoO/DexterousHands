@@ -179,6 +179,15 @@ def run_rollout_eval(ctx, model, tac_mode, img_size, action_dim, episodes, tac_v
                 tac = np.clip(tac / tac_vmax, 0.0, 1.0).astype(np.float32)
                 tac_t = torch.from_numpy(tac).unsqueeze(0).to(device)
             else:
+                # TODO(pred-tac live rollout): tac_mode="pred" is NOT supported here yet.
+                # train_bc_student.py's tac_mode="pred" arm only trains offline against a
+                # pre-generated pred_pressure_grids.npz (Ego2Contact's
+                # infer_pred_tactile_offline.py, a v2-dit sim-finetuned forward pass over the
+                # episode's saved rgb_frames). A live closed-loop rollout would need that same
+                # SAM3+WiLoR+DINO+v2-dit forward pass run online, per step, inside this loop --
+                # a separate, harder problem (see the project's earlier online-inference-latency
+                # findings) and explicitly out of scope for now. Falls through to the "none"
+                # (zero-tactile) branch below if ever called with tac_mode="pred".
                 tac_t = torch.zeros(1, 0, device=device)
 
             with torch.no_grad():
