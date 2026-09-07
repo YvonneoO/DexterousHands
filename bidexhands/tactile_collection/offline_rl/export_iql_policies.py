@@ -71,6 +71,7 @@ before trusting the whole sweep.
 """
 import os
 import re
+import json
 import glob
 import argparse
 
@@ -115,6 +116,8 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     exported, skipped = 0, 0
+    scaler_name = None
+    scaler_checked = False
     for step, path in ckpts:
         policy_path = os.path.join(out_dir, f"policy_step{step}.pt")
         if os.path.exists(policy_path):
@@ -124,9 +127,24 @@ def main():
             skipped += 1
             continue
         algo = d3rlpy.load_learnable(path, device=args.device)
+        if not scaler_checked:
+            # Every checkpoint in one training run shares the same IQLConfig, so
+            # checking once is enough. Recorded to export_info.json so Stage 2
+            # (isaacgym_py38, no d3rlpy import) and anything reading
+            # eval_sweep_result.json downstream can tell a post-fix (scaled) run
+            # from a pre-fix (unscaled, see train_iql.py's own comment on the
+            # p_gt_tac collapse this caused) one without re-loading the checkpoint.
+            scaler = algo.config.observation_scaler
+            scaler_name = type(scaler).__name__ if scaler is not None else None
+            scaler_checked = True
+            print(f"[export] observation_scaler={scaler_name}", flush=True)
         algo.save_policy(policy_path)
         print(f"[export] step={step:7d} exported -> {policy_path}", flush=True)
         exported += 1
+
+    if scaler_checked:
+        with open(os.path.join(out_dir, "export_info.json"), "w") as f:
+            json.dump({"observation_scaler": scaler_name}, f, indent=2)
 
     print(f"[export] done: {exported} exported, {skipped} already present, "
           f"{len(ckpts)} total in {out_dir}", flush=True)
