@@ -28,11 +28,11 @@ Fix (commit `1f8e8a8`, `dexteroushands_fork`/`qianqian-tactile-overlay`):
 `IQLConfig(observation_scaler=StandardObservationScaler())`, which auto-fits
 a z-score normalizer from each training dataset's own statistics. Retraining
 for both tasks was in progress as of 2026-09-07 — **check the
-`normalized_observations` field in each run's `eval_sweep_result.json`
-(added alongside the fix) before trusting any `p_gt_tac` result from this
-folder; if that field is absent, the checkpoint predates the fix and should
-be treated as unreliable.** `p_only` checkpoints are unaffected (no tactile
-channel to normalize) and are already final.
+`"observation_scaler"` field in each run's `eval_sweep_result.json`** (e.g.
+`"StandardObservationScaler"` = post-fix; `null` = pre-fix, unreliable,
+don't trust the curve) **before using any `p_gt_tac` checkpoint from this
+folder.** `p_only` checkpoints are unaffected (no tactile channel to
+normalize) and are already final.
 
 This fix has only been verified for the offline IQL pipeline
 (`build_mdp_dataset.py`/`train_iql.py`). Whether bidexhands' or VTDexManip's

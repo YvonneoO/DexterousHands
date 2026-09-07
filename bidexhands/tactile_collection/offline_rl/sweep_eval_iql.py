@@ -453,11 +453,22 @@ def main():
         wandb.summary["final_step"] = last["step"]
         wandb.finish()
 
+    # Forwarded from Stage 1's export_info.json (this script never imports d3rlpy
+    # itself, so it can't check the scaler directly) -- lets a reader of
+    # eval_sweep_result.json alone tell a post-fix (StandardObservationScaler,
+    # see train_iql.py) run from a pre-fix one without re-loading anything.
+    observation_scaler = None
+    export_info_path = os.path.join(args.ckpt_dir, args.exported_subdir, "export_info.json")
+    if os.path.isfile(export_info_path):
+        with open(export_info_path) as f:
+            observation_scaler = json.load(f).get("observation_scaler")
+
     result_path = os.path.join(args.ckpt_dir, "eval_sweep_result.json")
     with open(result_path, "w") as f:
         json.dump({
             "ckpt_dir": args.ckpt_dir, "arm": args.arm, "manifest": args.manifest,
             "prop_keys": prop_keys, "episodes_per_ckpt": args.episodes, "curve": curve,
+            "observation_scaler": observation_scaler,
             "wandb_run_url": run.url if run is not None else None,
         }, f, indent=2)
     print(f"[sweep] wrote {result_path}", flush=True)
