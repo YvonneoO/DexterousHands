@@ -53,6 +53,17 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
+# rollout_eval_core.py (imported for its build_eval_context env-setup helper only --
+# see sweep_eval_iql.py's own module docstring) unconditionally imports PIL at
+# module load time even though this script never uses it (no RGB capture here).
+# d3rlpy_offline was built for d3rlpy training only, so Pillow was never installed
+# in it -- confirmed failing 2026-09-07 (ModuleNotFoundError: No module named 'PIL',
+# jobs 513786-513789).
+if ! "${PYTHON_BIN}" -c "import PIL" 2>/dev/null; then
+  echo "[iql_sweep_eval] Pillow not present in d3rlpy_offline env, installing (small, no known conflicts)"
+  "${PYTHON_BIN}" -m pip install -q pillow
+fi
+
 : "${CKPT_DIR:?set CKPT_DIR=/path/to/iql_<arm>/iql_<arm>_<timestamp> (model_<step>.d3 files)}"
 : "${TASK:?set TASK=ShadowHandPen or ShadowHandScissors}"
 : "${ARM:?set ARM=p_only, p_gt_tac, or p_pred_tac}"
