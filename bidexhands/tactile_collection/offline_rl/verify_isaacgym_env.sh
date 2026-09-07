@@ -15,9 +15,18 @@ source "${YQQ}/env.sh"   # module load Miniforge3 CUDA/12.8.0 -- without this, n
 
 ENV_ROOT="${YQQ}/envs/bidexhands_isaacgym_py38"
 export LD_LIBRARY_PATH="${ENV_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# ninja (needed to JIT-compile isaacgym's gymtorch C++ extension, imported
+# transitively by every bidexhands task file) lives at ${ENV_ROOT}/bin/ninja
+# but is NOT put on PATH by anything else here -- a real `conda activate`
+# would add this automatically; the manual export-only approach used
+# elsewhere in this diagnostic session never did. Confirmed via
+# `RuntimeError: Ninja is required to load C++ extensions` even after
+# isaacgym/gym/torch had ALL already imported successfully.
+export PATH="${ENV_ROOT}/bin:${PATH}"
 
-"${ENV_ROOT}/bin/python" -c "
-import isaacgym
-import gym
-print('ISAACGYM_GYM_IMPORT_OK gym_version=' + gym.__version__)
-"
+cd "${YQQ}/DexterousHands/bidexhands"
+BIDEX_RECORD_DIR="${YQQ}/tmp_smoke_rollout" BIDEX_TARGET_SUCCESSES=1 BIDEX_MAX_EPISODES=5 \
+  "${ENV_ROOT}/bin/python" -m tactile_collection.ppo.rollout_success_videos \
+  --task ShadowHandPen --algo ppo --cfg_env cfg/ShadowHandPenProprioOnly.yaml \
+  --model_dir logs/ShadowHandPen/ppo/ppo_seed0/model_6500.pt \
+  --num_envs 1 --headless --seed 1234
