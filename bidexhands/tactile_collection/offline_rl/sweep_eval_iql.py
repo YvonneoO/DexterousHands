@@ -1,16 +1,37 @@
 #!/usr/bin/env python3
-"""Sweep every d3rlpy checkpoint (model_<step>.d3) from an IQL offline-RL training
-run through a LIVE rollout success-rate eval, logging a success-rate-vs-step curve
-to wandb.
+"""Stage 2 of the two-stage IQL sweep-eval: sweep every checkpoint EXPORTED by
+export_iql_policies.py (policy_step<N>.pt, TorchScript) from an IQL offline-RL
+training run through a LIVE rollout success-rate eval, logging a
+success-rate-vs-step curve to wandb. Runs ENTIRELY in `bidexhands_isaacgym_py38`
+(python 3.8) -- NOT `d3rlpy_offline` (python 3.11) anymore.
 
-Why this exists: IQL trains entirely offline -- `.fit()` (train_iql.py) never
-touches the IsaacGym env, so it never produces a success-rate curve the way PPO's
-own on-policy training does. This script fills that gap by actually rolling the
-saved policy out in the live sim, mirroring the pattern already established for
-PPO (ppo/eval_ppo_sweep.py) and BC (bc/sweep_eval_bc_student.py): a quick, biased
-per-checkpoint eval -> wandb.log({"step": ..., "success_rate_pct": ...}). Like
-those two, `--episodes` is deliberately modest (default 30) -- this is the curve,
-not a trustworthy final number.
+Two-stage split (why this script no longer imports d3rlpy): IsaacGym's
+precompiled .so bindings require the CPython 3.8 ABI, so `bidexhands` cannot be
+installed into `d3rlpy_offline` (confirmed 2026-09-07: `ModuleNotFoundError: No
+module named 'bidexhands'` -- not a missing-pip-install problem, the two worlds
+genuinely cannot coexist in one process on this cluster). The reverse direction
+was also already tried and rejected this session: installing d3rlpy directly
+into `bidexhands_isaacgym_py38` silently upgraded gym 0.23.1->0.26.2, breaking
+bidexhands' own pinned dependency. So the sweep now runs as two separate
+processes/envs that never need both worlds at once:
+  Stage 1 (export_iql_policies.py, `d3rlpy_offline`): loads each model_<step>.d3
+    via `d3rlpy.load_learnable` and calls `.save_policy(...)` to write a portable
+    `policy_step<N>.pt` under `<ckpt_dir>/exported_policies/` -- see that
+    script's module docstring for the save_policy() API verification.
+  Stage 2 (this script, `bidexhands_isaacgym_py38`): loads each `policy_step<N>.pt`
+    via plain `torch.jit.load` (no d3rlpy import at all) and rolls it out live.
+Chain them with `--dependency=afterok:<stage1_jobid>` at submit time (see
+export_iql_policies.sbatch's header for the exact command).
+
+Why the live-rollout eval exists at all: IQL trains entirely offline -- `.fit()`
+(train_iql.py) never touches the IsaacGym env, so it never produces a
+success-rate curve the way PPO's own on-policy training does. This script fills
+that gap by actually rolling the saved policy out in the live sim, mirroring the
+pattern already established for PPO (ppo/eval_ppo_sweep.py) and BC
+(bc/sweep_eval_bc_student.py): a quick, biased per-checkpoint eval ->
+wandb.log({"step": ..., "success_rate_pct": ...}). Like those two, `--episodes`
+is deliberately modest (default 30) -- this is the curve, not a trustworthy
+final number.
 
 Env construction reuses bc/rollout_eval_core.py's build_eval_context (the
 established task/env/camera/device setup pattern) for the ENV SETUP ONLY -- NOT
@@ -61,7 +82,9 @@ reading task.extras directly after env.step() is equivalent to reading infos;
 this script reads task.extras directly to match the fixed PPO pattern literally.
 
 Run as (bidexhands's own args after `--`, same convention as the other sweep
-scripts in this package):
+scripts in this package; requires export_iql_policies.py to have already
+written --ckpt_dir/exported_policies/policy_step<N>.pt -- Stage 1, run first
+in the d3rlpy_offline env):
     cd <DexterousHands root>/bidexhands
     python -m tactile_collection.offline_rl.sweep_eval_iql \
         --ckpt_dir runs/offline_rl/pen_p_gt_tac/iql_p_gt_tac/iql_p_gt_tac_20260907002040 \
@@ -70,29 +93,30 @@ scripts in this package):
         -- --task ShadowHandPen --algo ppo --cfg_env cfg/ShadowHandPenProprioGTTac.yaml \
            --num_envs 1 --headless --seed 1234
 
-Not yet run anywhere -- no cluster/IsaacGym/d3rlpy access from this machine (same
+Not yet run anywhere -- no cluster/IsaacGym access from this machine (same
 caveat as build_mdp_dataset.py/train_iql.py's own module docstrings).
 
-d3rlpy checkpoint-loading API -- VERIFIED against d3rlpy's actual GitHub source at
-tag v2.8.1 (the version this project's cluster has confirmed installed), not
-guessed:
-  - `d3rlpy/base.py` `load_learnable(fname: str, device=None) -> LearnableBase`:
-    takes a BARE PATH STRING (not an open file handle -- unlike
-    train_iql.py's `_load_dataset`, which DOES need a file handle for
-    ReplayBuffer.load), unpickles it, rebuilds the algo from its serialized
-    config, and loads the network weights. Ready to call `.predict()` immediately.
-  - `d3rlpy/logging/file_adapter.py` `FileAdapter.save_model(epoch, algo)`:
-    `model_path = os.path.join(logdir, f"model_{epoch}.d3"); algo.save(model_path)`
-    -- confirms `model_<step>.d3` (train_iql.py's automatic per-epoch checkpoints,
-    called with `epoch=total_step`, hence "step" not "epoch" in the filename) is
-    written via plain `algo.save()`, the exact counterpart `load_learnable` reads.
-  - `d3rlpy/algos/qlearning/base.py` `QLearningAlgoBase.predict(x)`: calls
-    `self._impl.predict_best_action(torch_x)` internally -- this IS the
-    deterministic/greedy action (there is no separate "predict_best_action" the
-    caller needs to reach for; `sample_action()` is the separate STOCHASTIC method
-    this script deliberately does not use, matching PPO's/BC's own preference for
-    deterministic eval actions). Input/output shapes are batched numpy:
-    `x: (N, obs_dim) -> (N, action_dim)`.
+`model_<step>.d3` naming provenance (still relevant for matching a
+`policy_step<N>.pt` back to its source checkpoint) -- VERIFIED against d3rlpy's
+actual GitHub source at tag v2.8.1: `d3rlpy/logging/file_adapter.py`
+`FileAdapter.save_model(epoch, algo)` does
+`model_path = os.path.join(logdir, f"model_{epoch}.d3"); algo.save(model_path)`,
+called with `epoch=total_step` by d3rlpy's own training loop -- hence "step" not
+"epoch" in the filename. export_iql_policies.py reads that same step number back
+out of each `model_<step>.d3` and writes `policy_step<step>.pt`, so the two
+numberings line up by construction.
+
+TorchScript policy-loading -- see export_iql_policies.py's module docstring for
+the full save_policy() API verification (against d3rlpy's real GitHub source at
+v2.8.1, same standard as everything else in this file). Summary of what matters
+here: `torch.jit.load(path, map_location=device)` returns a module callable as
+`action = policy(obs_tensor)` with `obs_tensor: (N, obs_dim) float32 ->
+action: (N, action_dim) float32` -- this IS the deterministic/greedy action
+(`predict_best_action`, the same call d3rlpy's own `.predict()` makes
+internally), with no hidden observation/action rescaling (train_iql.py's
+`IQLConfig` never sets either scaler). No numpy round-trip is needed here (unlike
+the old `algo.predict(numpy_array)` d3rlpy call this replaces) -- build a tensor
+once and feed it straight to the traced module.
 """
 import os
 import re
@@ -104,7 +128,8 @@ import numpy as np
 
 # isaacgym must be imported before torch anywhere in the process -- this pulls
 # it in via bidexhands.utils.config (rollout_eval_core -> that chain), so
-# `import torch`/`import d3rlpy` below must stay after this import, not before.
+# `import torch` below must stay after this import, not before. (No d3rlpy
+# import anywhere in this file anymore -- see module docstring's two-stage split.)
 from tactile_collection.bc.rollout_eval_core import build_eval_context
 from tactile_collection.rollout_tactile_rgb_chest import as_numpy, env0
 
@@ -120,15 +145,16 @@ except ImportError:
     wandb = None
 
 
-def step_checkpoints(ckpt_dir):
-    """Sorted list of (step, path) for every model_<step>.d3 in ckpt_dir. These
-    are written automatically by d3rlpy's FileAdapterFactory every epoch during
-    train_iql.py's .fit() (save_interval=1 default, see train_iql.py module
-    docstring) -- no separate save step needed on the training side."""
-    paths = glob.glob(os.path.join(ckpt_dir, "model_*.d3"))
+def step_checkpoints(ckpt_dir, exported_subdir):
+    """Sorted list of (step, path) for every policy_step<N>.pt under
+    ckpt_dir/exported_subdir -- these are written by export_iql_policies.py
+    (Stage 1), one per model_<step>.d3 it found. If this comes back empty,
+    Stage 1 either hasn't run yet or hasn't finished -- run/wait on
+    export_iql_policies.sbatch first (see this script's module docstring)."""
+    paths = glob.glob(os.path.join(ckpt_dir, exported_subdir, "policy_step*.pt"))
     out = []
     for p in paths:
-        m = re.search(r"model_(\d+)\.d3$", os.path.basename(p))
+        m = re.search(r"policy_step(\d+)\.pt$", os.path.basename(p))
         if m:
             out.append((int(m.group(1)), p))
     return sorted(out)
@@ -271,13 +297,14 @@ def build_live_observation(ctx, arm, prop_keys, object_body_indices, object_dof_
     return np.concatenate([prop, tac], axis=1).astype(np.float32)
 
 
-def run_iql_rollout(ctx, algo, arm, prop_keys, episodes, object_body_indices, object_dof_indices):
-    """Roll `algo` out for `episodes` fresh episodes in ctx.env, querying and
-    acting on the policy EVERY step (no frame_stride/zero-order-hold cadence --
-    unlike BC's rollout_eval_core.run_rollout_eval, IQL was trained on every
-    per-step transition, not RGB-frame-subsampled ones, so eval-time cadence
-    should match that: full density). Returns a list of bool successes, one per
-    completed episode."""
+def run_iql_rollout(ctx, policy, arm, prop_keys, episodes, object_body_indices, object_dof_indices):
+    """Roll the exported TorchScript `policy` out for `episodes` fresh episodes
+    in ctx.env, querying and acting on the policy EVERY step (no
+    frame_stride/zero-order-hold cadence -- unlike BC's
+    rollout_eval_core.run_rollout_eval, IQL was trained on every per-step
+    transition, not RGB-frame-subsampled ones, so eval-time cadence should match
+    that: full density). Returns a list of bool successes, one per completed
+    episode."""
     task, env, device = ctx.task, ctx.env, ctx.device
     action_dim = task.num_actions
 
@@ -287,10 +314,14 @@ def run_iql_rollout(ctx, algo, arm, prop_keys, episodes, object_body_indices, ob
 
     while len(successes) < episodes:
         obs_row = build_live_observation(ctx, arm, prop_keys, object_body_indices, object_dof_indices)
-        action = algo.predict(obs_row)  # greedy/deterministic, (1, action_dim)
-        action_t = torch.as_tensor(action, dtype=torch.float32, device=device).reshape(1, action_dim)
+        obs_t = torch.as_tensor(obs_row, dtype=torch.float32, device=device)  # (1, obs_dim)
 
         with torch.no_grad():
+            # policy() IS the greedy/deterministic action (predict_best_action) --
+            # see export_iql_policies.py's module docstring for the save_policy()
+            # verification this call signature is based on. No numpy round-trip
+            # needed, unlike the old d3rlpy `algo.predict(numpy_array)` this replaces.
+            action_t = policy(obs_t).reshape(1, action_dim)
             next_obs, rew, done, infos = env.step(action_t)
             obs.copy_(next_obs)
 
@@ -315,8 +346,13 @@ def run_iql_rollout(ctx, algo, arm, prop_keys, episodes, object_body_indices, ob
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt_dir", required=True,
-                     help="an offline_rl_iql.sbatch training run's OUT_DIR/iql_<arm> dir "
-                          "(must contain model_<step>.d3 checkpoints)")
+                     help="an offline_rl_iql.sbatch training run's OUT_DIR/iql_<arm> dir -- "
+                          "must contain <ckpt_dir>/<exported_subdir>/policy_step<N>.pt files "
+                          "already written by export_iql_policies.py (Stage 1), NOT bare "
+                          "model_<step>.d3 checkpoints (this script no longer reads those directly)")
+    ap.add_argument("--exported_subdir", default="exported_policies",
+                     help="subdir under --ckpt_dir holding policy_step<N>.pt -- must match "
+                          "export_iql_policies.py's --out_subdir from Stage 1 (default matches)")
     ap.add_argument("--arm", choices=["p_only", "p_gt_tac", "p_pred_tac"], required=True)
     ap.add_argument("--manifest", required=True,
                      help="the SAME manifest build_mdp_dataset.py used to build this "
@@ -343,9 +379,12 @@ def main():
     if unknown and unknown[0] == "--":
         unknown = unknown[1:]
 
-    ckpts = step_checkpoints(args.ckpt_dir)
+    ckpts = step_checkpoints(args.ckpt_dir, args.exported_subdir)
     if not ckpts:
-        raise RuntimeError(f"no model_<step>.d3 checkpoints found under {args.ckpt_dir}")
+        raise RuntimeError(
+            f"no policy_step<N>.pt files found under {args.ckpt_dir}/{args.exported_subdir} -- "
+            f"run export_iql_policies.py (Stage 1, d3rlpy_offline env) on this ckpt_dir first"
+        )
     print(f"[sweep] {len(ckpts)} checkpoints: steps {[s for s, _ in ckpts]}", flush=True)
 
     prop_keys = prop_keys_from_manifest(args.manifest)
@@ -373,8 +412,6 @@ def main():
     if "object_rigid_body_state" in prop_keys or "object_dof_state" in prop_keys:
         object_body_indices, object_dof_indices = object_actor_indices(ctx.task)
 
-    import d3rlpy  # deferred: isaacgym-before-torch ordering above must happen first
-
     run = None
     if wandb is not None:
         run = wandb.init(
@@ -391,9 +428,14 @@ def main():
 
     curve = []
     for step, path in ckpts:
-        algo = d3rlpy.load_learnable(path, device=ctx.device)
+        # map_location=ctx.device: the trace is device-tagged at export time to
+        # whatever --device export_iql_policies.py ran with (default cpu:0), which
+        # will usually differ from this live rollout's cuda device -- see that
+        # script's module docstring for why the export device doesn't need to match.
+        policy = torch.jit.load(path, map_location=ctx.device)
+        policy.eval()
         successes = run_iql_rollout(
-            ctx, algo, args.arm, prop_keys, args.episodes, object_body_indices, object_dof_indices,
+            ctx, policy, args.arm, prop_keys, args.episodes, object_body_indices, object_dof_indices,
         )
         sr = 100.0 * sum(successes) / len(successes) if successes else float("nan")
         print(f"[sweep] step={step:7d}  quick_SR({args.episodes} eps)={sr:.2f}%", flush=True)
