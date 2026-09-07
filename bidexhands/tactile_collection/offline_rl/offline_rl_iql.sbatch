@@ -58,7 +58,12 @@ N_STEPS="${N_STEPS:-100000}"
 
 mkdir -p "${OUT_DIR}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# NOT $(dirname "${BASH_SOURCE[0]}") -- this cluster's SLURM copies the submitted
+# script into a per-job spool dir (/cm/local/apps/slurm/var/spool/job<id>/) before
+# running it, so BASH_SOURCE[0] resolves there, not to this script's real repo
+# location (confirmed failing 2026-09-06: "can't open file '.../spool/job511112/
+# build_mdp_dataset.py'"). Hardcode the known repo path instead.
+SCRIPT_DIR="${YQQ}/DexterousHands/bidexhands/tactile_collection/offline_rl"
 DATASET_PATH="${OUT_DIR}/dataset_${ARM}.h5"
 
 echo "[offline_rl_iql] MANIFEST=${MANIFEST} ARM=${ARM} OUT_DIR=${OUT_DIR} N_STEPS=${N_STEPS}"
