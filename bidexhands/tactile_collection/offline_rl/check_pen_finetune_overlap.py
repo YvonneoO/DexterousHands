@@ -1,46 +1,40 @@
 #!/usr/bin/env python3
-"""One-off diagnostic: does our Pen offline-RL/BC episode manifest overlap with
-the episodes v2-dit's sim-finetune (checkpoints/v2_wilor_feat_dit_sim_finetune_1k)
-was itself trained/val'd on?
+"""One-off diagnostic: does an offline-RL/BC episode manifest (Pen or Scissors)
+overlap with the episodes v2-dit's sim-finetune
+(checkpoints/v2_wilor_feat_dit_sim_finetune_1k) was itself trained/val'd on?
 
 The finetune's episode selection is Ego2Contact's plan_shards.py `collect_episodes()`
-(scripts/sim_data_collection/dexteroushands/plan_shards.py): walks the Pen task's 8
-shard roots in a FIXED order, taking `sorted(os.listdir(successful_episodes))` within
-each root, and stops once n_total episodes are collected. Per experiments/STATUS.md
-the "1k" run used 900 train / 100 val per task -- i.e. the first 900 episodes (in that
+(scripts/sim_data_collection/dexteroushands/plan_shards.py): walks each task's shard
+roots in a FIXED order, taking `sorted(os.listdir(successful_episodes))` within each
+root, and stops once n_total episodes are collected. Per experiments/STATUS.md the
+"1k" run used 900 train / 100 val PER TASK -- i.e. the first 900 episodes (in that
 deterministic order) were the finetune's TRAIN set, and the next 100 were its VAL set.
 
 This script re-derives that exact same first-1000 slice directly against the live
-filesystem (no assumptions about per-shard episode counts), then compares it against
-an existing offline-RL/BC manifest JSON (the {"shard_dir":..., "episode":...} pair
-schema from generate_episode_manifest.py) to report exact overlap counts.
+filesystem (no assumptions about per-shard episode counts, shared with
+dump_finetune_exposed_episodes.py's TASK_ROOTS), then compares it against an existing
+offline-RL/BC manifest JSON (the {"shard_dir":..., "episode":...} pair schema from
+generate_episode_manifest.py) to report exact overlap counts.
 
 Usage:
-    python check_pen_finetune_overlap.py --manifest pen_manifest_1000.json
+    python check_pen_finetune_overlap.py --task pen --manifest pen_manifest_1000.json
+    python check_pen_finetune_overlap.py --task scissors --manifest scissors_manifest_1000.json
 """
 import argparse
 import json
 import os
 
-BASE = "/scratch/project/prj-02-phai-lab/yqq/DexterousHands/runs/tactile_dataset"
-PEN_ROOTS = [
-    f"{BASE}/shadow_hand_pen/{n}" for n in [
-        "wilor_view_raw_rigid_batch_0000_0200", "wilor_view_raw_rigid_data_0200_1200",
-        "wilor_view_raw_rigid_data_1200_2200", "wilor_view_raw_rigid_data_2200_3200",
-        "wilor_view_raw_rigid_data_3200_3242_repair", "wilor_view_raw_rigid_data_3200_4200",
-        "wilor_view_raw_rigid_data_4200_4600", "wilor_view_raw_rigid_data_4600_5000",
-    ]
-]
+from dump_finetune_exposed_episodes import TASK_ROOTS
 
 
-def collect_episodes(n_total):
+def collect_episodes(task, n_total):
     """Mirrors plan_shards.py's collect_episodes() exactly: fixed root order,
     sorted-listdir within each root, stop once n_total reached. Returns a list
     of (shard_dir, episode_name) pairs -- shard_dir is the ROOT itself (matching
     generate_episode_manifest.py's manifest schema, where shard_dir is the
     collection-run directory, one level above successful_episodes/)."""
     eps = []
-    for root in PEN_ROOTS:
+    for root in TASK_ROOTS[task]:
         d = os.path.join(root, "successful_episodes")
         if not os.path.isdir(d):
             continue
@@ -55,13 +49,14 @@ def collect_episodes(n_total):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--manifest", required=True, help="an offline_rl/bc pen manifest JSON")
+    ap.add_argument("--manifest", required=True, help="an offline_rl/bc manifest JSON")
+    ap.add_argument("--task", required=True, choices=list(TASK_ROOTS.keys()))
     ap.add_argument("--finetune_train", type=int, default=900)
     ap.add_argument("--finetune_val", type=int, default=100)
     args = ap.parse_args()
 
     n_total = args.finetune_train + args.finetune_val
-    finetune_eps = collect_episodes(n_total)
+    finetune_eps = collect_episodes(args.task, n_total)
     finetune_train_set = set(finetune_eps[:args.finetune_train])
     finetune_val_set = set(finetune_eps[args.finetune_train:n_total])
     print(f"[finetune] re-derived {len(finetune_eps)} episodes "

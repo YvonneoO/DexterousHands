@@ -78,12 +78,31 @@ def main():
     ap.add_argument("--val_frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--exclude", action="append", default=[],
+                     help="path to a JSON file of [shard_dir, episode] pairs to exclude "
+                          "before sampling (e.g. dump_finetune_exposed_episodes.py's output, "
+                          "so a Pred-Tac/offline-RL manifest never draws an episode v2-dit's "
+                          "own sim-finetune already trained/val'd on -- see "
+                          "check_pen_finetune_overlap.py, which found 19.1% overlap before "
+                          "this flag existed). Repeatable.")
     args = ap.parse_args()
 
     episodes = discover_episodes(args.shard_glob)
     n_shards = len(set(e["shard_dir"] for e in episodes))
     print(f"[discover] {len(episodes)} complete successful episodes found "
           f"across {n_shards} shard dirs", flush=True)
+
+    if args.exclude:
+        exclude_set = set()
+        for path in args.exclude:
+            with open(path) as f:
+                exclude_set.update(tuple(pair) for pair in json.load(f))
+        n_before = len(episodes)
+        episodes = [e for e in episodes if (e["shard_dir"], e["episode"]) not in exclude_set]
+        print(f"[exclude] dropped {n_before - len(episodes)} episodes present in "
+              f"{len(args.exclude)} exclude list(s) ({len(exclude_set)} entries total); "
+              f"{len(episodes)} remain", flush=True)
+
     if len(episodes) < args.max_episodes:
         print(f"[warn] only {len(episodes)} episodes available, "
               f"fewer than --max_episodes {args.max_episodes}", flush=True)
