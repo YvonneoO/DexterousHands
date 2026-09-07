@@ -33,6 +33,13 @@ set -euo pipefail
 YQQ="/scratch/project/prj-02-phai-lab/yqq"
 source "${YQQ}/env.sh"   # modules + caches->yqq + HF/GH/WANDB tokens (see rules/vision-workflow.md)
 
+# numpy's bundled OpenBLAS auto-detects the NODE's full core count (not this job's
+# cgroup-limited --cpus-per-task), then crashes with RLIMIT_NPROC pthread_create
+# failures trying to spawn that many threads -- cap explicitly to what was requested.
+export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-2}"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-2}"
+export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-2}"
+
 PYTHON_BIN="${PYTHON_BIN:-${YQQ}/envs/d3rlpy_offline/bin/python}"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "ERROR: ${PYTHON_BIN} not found -- run setup_d3rlpy_env.sh once to create the " \
