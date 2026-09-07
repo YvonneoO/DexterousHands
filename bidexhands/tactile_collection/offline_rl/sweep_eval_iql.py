@@ -113,8 +113,12 @@ here: `torch.jit.load(path, map_location=device)` returns a module callable as
 `action = policy(obs_tensor)` with `obs_tensor: (N, obs_dim) float32 ->
 action: (N, action_dim) float32` -- this IS the deterministic/greedy action
 (`predict_best_action`, the same call d3rlpy's own `.predict()` makes
-internally), with no hidden observation/action rescaling (train_iql.py's
-`IQLConfig` never sets either scaler). No numpy round-trip is needed here (unlike
+internally). train_iql.py configures `observation_scaler=
+StandardObservationScaler()` (added 2026-09-07, see its own comment for why) --
+that z-score transform is baked directly into this traced module by
+`save_policy()` itself, so this script still just calls `policy(obs_tensor)`
+with the SAME raw (unnormalized) observation build_live_observation() already
+constructs; no extra normalization step belongs here. No numpy round-trip is needed here (unlike
 the old `algo.predict(numpy_array)` d3rlpy call this replaces) -- build a tensor
 once and feed it straight to the traced module.
 """

@@ -94,6 +94,7 @@ def main():
 
     import d3rlpy
     from d3rlpy.algos import IQLConfig
+    from d3rlpy.preprocessing import StandardObservationScaler
 
     d3rlpy.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
@@ -104,7 +105,23 @@ def main():
     device = args.device or ("cuda:0" if _cuda_available() else "cpu:0")
     print(f"[train] device={device}", flush=True)
 
-    iql = IQLConfig(batch_size=args.batch_size).create(device=device)
+    # p_gt_tac/p_pred_tac observations concatenate proprioception (radians/meters,
+    # O(0.1-3)) with RAW pressure_grids.npz values in Pa -- build_mdp_dataset.py's
+    # flatten_tactile() applies no rescaling. Task contact-pressure vmax (99th
+    # pctile) ranges from ~255 Pa (scissors) to ~19087 Pa (pen) -- 2 to 4 orders
+    # of magnitude above proprio's own scale, with NO observation_scaler ever
+    # configured here previously. Confirmed 2026-09-07: this correlates exactly
+    # with per-task P+GT-tac IQL failure severity (pen, worst mismatch, never
+    # learns at all; scissors, milder mismatch, learns then diverges/collapses
+    # later in training) -- a classic unnormalized-input-scale optimization
+    # failure, not evidence tactile itself is unhelpful. StandardObservationScaler
+    # (mean=None,std=None) auto-fits from `dataset`'s own transition statistics
+    # inside `.fit()` (via build_scalers_with_transition_picker, verified against
+    # d3rlpy's real v2.8.1 source) -- no extra fit step needed here. Applying
+    # this to EVERY arm (not just p_gt_tac) keeps p_only comparable/consistent,
+    # and costs nothing for p_only's own naturally-small-scale proprio-only obs.
+    iql = IQLConfig(batch_size=args.batch_size,
+                     observation_scaler=StandardObservationScaler()).create(device=device)
 
     logger_adapter = _build_logger_adapter(args.out, args.wandb_project, args.wandb_name)
     experiment_name = os.path.basename(os.path.normpath(args.out))

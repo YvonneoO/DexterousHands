@@ -32,13 +32,16 @@ sweep_eval_iql.py's own module docstring):
   `self._impl.predict_best_action(observation)` -- the SAME greedy/
   deterministic call `.predict()` makes internally -- and, ONLY if the
   algo's config carries an `observation_scaler`/`action_scaler`, wraps it
-  with `transform(...)`/`reverse_transform(...)`. train_iql.py's
-  `IQLConfig(batch_size=...)` never sets either scaler, and d3rlpy's
-  `LearnableConfig` base class defaults BOTH to `None` (confirmed via
-  `generate_optional_config_generation` in
-  d3rlpy/preprocessing/{observation,action}_scalers.py) -- so the traced
-  graph is a bare `predict_best_action` forward, no hidden rescaling to
-  account for on the Stage 2 side.
+  with `transform(...)`/`reverse_transform(...)`. train_iql.py now DOES
+  configure `observation_scaler=StandardObservationScaler()` (added
+  2026-09-07 -- unnormalized raw-Pa tactile vs radian/meter-scale proprio
+  was causing p_gt_tac's per-task-severity-correlated failure/collapse, see
+  train_iql.py's own comment), so `save_policy`'s exported graph now
+  automatically includes the input z-score transform baked in -- Stage 2
+  never needs to know or replicate the scaler itself, it just calls the
+  traced module and gets a correctly-normalized forward pass for free.
+  `action_scaler` stays unset (action space is already the model's own
+  bounded joint-target scale, no rescaling needed there).
   For a flat (non-tuple) observation shape -- true here, `build_mdp_dataset.py`
   writes one concatenated proprio(+tactile) vector per step, not a
   dict/tuple observation -- `save_policy` traces the closure against a
