@@ -6,12 +6,14 @@ supervises at frames because it needs the rendered image; IQL needs full
 transition density for its Q/V targets, so the RGB-frame subsampling in
 train_bc_student.py's _episode_frame_rows is deliberately NOT reused here).
 
-Two arms (--arm):
-  p_only     : proprioception only                                   -> obs
-  p_gt_tac   : proprioception + GT tactile (pressure_grids.npz)       -> obs
-(no vision, no predicted-tactile arm -- offline RL here trains on state,
-not pixels; a vision/pred-tac arm can be added later following the same
-pattern as train_bc_student.py's tac_mode="pred" if wanted.)
+Three arms (--arm):
+  p_only     : proprioception only                                     -> obs
+  p_gt_tac   : proprioception + GT tactile (pressure_grids.npz)         -> obs
+  p_pred_tac : proprioception + PREDICTED tactile (pred_pressure_grids.npz,
+               written offline by Ego2Contact's infer_pred_tactile_offline.py)
+               -> obs
+(no vision -- offline RL here trains on state, not pixels, unlike
+train_bc_student.py's BC arms which also read rgb_frames/.)
 
 Proprio keys are NOT hardcoded: the exact set of per-step state arrays a
 trajectory_env0.npz carries is task-dependent (see rollout_tactile_rgb_chest.py
@@ -109,12 +111,12 @@ def build_episode_arrays(traj, press, arm, prop_keys):
     which it mostly does not since manifests only contain SUCCESSFUL
     episodes (done=True at genuine success in the overwhelming case).
     """
-    assert arm in ("p_only", "p_gt_tac")
+    assert arm in ("p_only", "p_gt_tac", "p_pred_tac")
 
     prop = flatten_proprio(traj, prop_keys)
     t = prop.shape[0]
 
-    if arm == "p_gt_tac":
+    if arm in ("p_gt_tac", "p_pred_tac"):
         tac = flatten_tactile(press)
         if tac.shape[0] != t:
             raise ValueError(f"tactile T={tac.shape[0]} != proprio T={t}")
@@ -237,8 +239,10 @@ def build_dataset(manifest_path, arm, out_path):
                     f"collected under different task configs; fix the manifest, don't "
                     f"silently intersect/pad around this"
                 )
-            press_path = os.path.join(ep_dir, "pressure_grids.npz")
-            press = np.load(press_path) if arm == "p_gt_tac" else None
+            tac_file = {"p_gt_tac": "pressure_grids.npz",
+                        "p_pred_tac": "pred_pressure_grids.npz"}.get(arm)
+            press_path = os.path.join(ep_dir, tac_file) if tac_file else None
+            press = np.load(press_path) if press_path else None
             try:
                 episode_arrays.append(build_episode_arrays(traj, press, arm, prop_keys))
             finally:
@@ -273,7 +277,7 @@ def main():
                      help="episode manifest JSON from generate_episode_manifest.py "
                           "(uses manifest['train'] -- val is held out for eval, not "
                           "part of the offline-RL training buffer)")
-    ap.add_argument("--arm", choices=["p_only", "p_gt_tac"], required=True)
+    ap.add_argument("--arm", choices=["p_only", "p_gt_tac", "p_pred_tac"], required=True)
     ap.add_argument("--out", required=True, help="output .h5 dataset path")
     args = ap.parse_args()
     build_dataset(args.manifest, args.arm, args.out)

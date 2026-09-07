@@ -5,7 +5,7 @@
 #
 # Required env vars (--export=ALL,VAR=val,... at submission):
 #   MANIFEST  path to an episode manifest JSON (generate_episode_manifest.py)
-#   ARM       p_only | p_gt_tac
+#   ARM       p_only | p_gt_tac | p_pred_tac
 #   OUT_DIR   output directory (dataset .h5 + IQL checkpoint + logs go here)
 # Optional:
 #   N_STEPS         IQL training steps (default 100000)
@@ -48,10 +48,10 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
 fi
 
 : "${MANIFEST:?set MANIFEST=/path/to/<task>_manifest.json}"
-: "${ARM:?set ARM=p_only or p_gt_tac}"
+: "${ARM:?set ARM=p_only, p_gt_tac, or p_pred_tac}"
 : "${OUT_DIR:?set OUT_DIR=/path/to/output/dir}"
-if [[ "${ARM}" != "p_only" && "${ARM}" != "p_gt_tac" ]]; then
-  echo "ERROR: ARM must be p_only or p_gt_tac, got '${ARM}'" >&2
+if [[ "${ARM}" != "p_only" && "${ARM}" != "p_gt_tac" && "${ARM}" != "p_pred_tac" ]]; then
+  echo "ERROR: ARM must be p_only, p_gt_tac, or p_pred_tac, got '${ARM}'" >&2
   exit 1
 fi
 N_STEPS="${N_STEPS:-100000}"
