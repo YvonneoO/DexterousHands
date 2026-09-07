@@ -7,7 +7,13 @@
 # mangled through nested tmux send-keys quoting layers.
 set -euo pipefail
 
-ENV_ROOT="/scratch/project/prj-02-phai-lab/yqq/envs/bidexhands_isaacgym_py38"
+YQQ="/scratch/project/prj-02-phai-lab/yqq"
+source "${YQQ}/env.sh"   # module load Miniforge3 CUDA/12.8.0 -- without this, numpy's C
+                         # extension segfaults on import ("PyCapsule_Import could not
+                         # import module 'datetime'", confirmed reproducing this session's
+                         # earlier job-511093 failure when this step is skipped).
+
+ENV_ROOT="${YQQ}/envs/bidexhands_isaacgym_py38"
 export LD_LIBRARY_PATH="${ENV_ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 "${ENV_ROOT}/bin/python" -c "
