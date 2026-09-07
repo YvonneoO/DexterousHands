@@ -24,15 +24,16 @@ import numpy as np
 
 
 def _load_dataset(path):
-    """Mirror of build_mdp_dataset.py's _dump_dataset -- try the documented
-    v2 file-handle convention first, fall back to a bare path. See that
-    module's _dump_dataset docstring for the same version caveat."""
-    from d3rlpy.dataset import MDPDataset
-    try:
-        with open(path, "rb") as f:
-            return MDPDataset.load(f)
-    except TypeError:
-        return MDPDataset.load(path)
+    """Load a dataset written by build_mdp_dataset.py's `dataset.dump(f)`.
+    Confirmed against d3rlpy 2.8.1 on VISION (job 511910): MDPDataset.load()
+    is NOT the right call -- MDPDataset(...) actually returns a ReplayBuffer
+    instance, and reloading it needs `ReplayBuffer.load(f, buffer)` where
+    `buffer` is a fresh InfiniteBuffer() for `load` to reconstruct episodes
+    into (the bare MDPDataset.load(path)/```load(f)``` calls both raise
+    "missing 1 required positional argument: 'buffer'")."""
+    from d3rlpy.dataset import ReplayBuffer, InfiniteBuffer
+    with open(path, "rb") as f:
+        return ReplayBuffer.load(f, InfiniteBuffer())
 
 
 def _cuda_available():
