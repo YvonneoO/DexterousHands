@@ -9,6 +9,7 @@
 #   OUT_DIR   output directory (dataset .h5 + IQL checkpoint + logs go here)
 # Optional:
 #   N_STEPS         IQL training steps (default 100000)
+#   EXPECTILE       forwarded to train_iql.py --expectile if set (default: d3rlpy's own 0.7)
 #   WANDB_PROJECT   forwarded to train_iql.py --wandb_project if set
 #   WANDB_NAME      forwarded to train_iql.py --wandb_name if set
 #
@@ -81,6 +82,9 @@ if [[ -n "${WANDB_PROJECT:-}" ]]; then
 fi
 if [[ -n "${WANDB_NAME:-}" ]]; then
   WANDB_ARGS+=(--wandb_name "${WANDB_NAME}")
+fi
+if [[ -n "${EXPECTILE:-}" ]]; then
+  WANDB_ARGS+=(--expectile "${EXPECTILE}")
 fi
 
 "${PYTHON_BIN}" "${SCRIPT_DIR}/train_iql.py" \
