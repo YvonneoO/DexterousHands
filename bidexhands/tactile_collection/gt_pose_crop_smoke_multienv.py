@@ -78,8 +78,12 @@ def main():
             actions = action_scale * (2.0 * torch.rand(env.num_envs, env.num_actions, device=env.rl_device) - 1.0)
             env.step(actions)
 
-    frames = render_all_and_capture(task, cameras, width, height)  # (num_envs, H, W, 3) RGB
+    # Position cameras (and compute their boxes from the resulting view/proj
+    # matrices) BEFORE rendering -- render_all_and_capture must see the SAME
+    # transform build_bimanual_boxes_all_envs just set, not whatever the
+    # camera's previous/default transform was.
     sides_all_envs, eyes, targets = build_bimanual_boxes_all_envs(task, cameras, palm_handles, width, height)
+    frames = render_all_and_capture(task, cameras, width, height)  # (num_envs, H, W, 3) RGB
 
     results = []
     for i in range(env.num_envs):

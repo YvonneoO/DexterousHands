@@ -1122,9 +1122,12 @@ class ShadowHandPen(BaseTask):
         if not hasattr(self, "_predtac_client"):
             self._predtac_lazy_init()
 
-        frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
+        # Position cameras (and compute their boxes) BEFORE rendering --
+        # render_all_and_capture must see the transform just set below, not
+        # last tick's (or, on the very first call, the sensor's default).
         sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
             self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
+        frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
         self._predtac_client.submit(frames, sides_all_envs)
         continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
 

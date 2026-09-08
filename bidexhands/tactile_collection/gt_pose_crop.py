@@ -144,17 +144,15 @@ def build_bimanual_boxes_from_task(task, camera, palm_handle, width, height):
 
 
 def _hand_link_points_env(task, actor_name, env_idx):
-    """World-frame points, MINUS that env's own local origin -- the camera's
-    view/proj matrices operate in the env-local frame (see multi_env_camera
-    .env_origin's docstring for why), so points fed to project_world_to_pixel
-    must be converted to that same frame or the projection is wrong for
-    every env except env 0 (whose origin happens to be (0,0,0) here)."""
-    from tactile_collection.multi_env_camera import env_origin, rigid_body_positions_env
+    """rigid_body_states (and hence these points) are already reported in
+    each env's own local frame in this codebase -- confirmed empirically
+    2026-09-08 (multi-env smoke test debug output: env1's workspace center
+    read the same ballpark as env0's, not offset by its own grid spacing).
+    No origin conversion needed -- see multi_env_camera.env_origin's
+    docstring for the dead-end version of this file that subtracted one."""
+    from tactile_collection.multi_env_camera import rigid_body_positions_env
     idx = actor_named_body_env_indices(task, actor_name, HAND_LINK_PATTERNS)
-    pts = rigid_body_positions_env(task, idx, env_idx)
-    if pts is None:
-        return None
-    return pts - env_origin(task, env_idx)[None, :]
+    return rigid_body_positions_env(task, idx, env_idx)
 
 
 def gt_hand_boxes_env(task, view_matrix, proj_matrix, width, height, env_idx,

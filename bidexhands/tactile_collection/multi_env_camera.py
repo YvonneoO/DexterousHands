@@ -41,19 +41,20 @@ HAND_ACTORS = ("hand", "another_hand")
 
 
 def env_origin(task, env_idx):
-    """Isaac Gym's per-env local origin, as a (3,) numpy array. set_camera_
-    location's eye/target are in EACH ENV'S OWN LOCAL FRAME, not the shared
-    world frame rigid_body_states/object_pos are read in (confirmed against
-    bidexhands/tasks/shadow_hand_point_cloud.py's own multi-env camera setup,
-    which calls set_camera_location with the SAME literal Vec3 for every
-    env -- that only makes sense if the call is env-local). Subtract this
-    from any world-frame point before passing it to set_camera_location OR
-    before projecting it with that camera's view/proj matrices (both operate
-    in the camera's own env-local frame). Caught 2026-09-08: the single-env
-    code (rollout_tactile_rgb_chest.py, gt_pose_crop.py's non-"_env"
-    functions) never needed this because env 0's origin is (0,0,0) in this
-    codebase's env layout -- world-frame and env-local coincide there by
-    coincidence, which is why only env 0 "worked" before this fix."""
+    """Isaac Gym's per-env local origin, as a (3,) numpy array. NOT used for
+    coordinate conversion below (see history) -- kept only in case a future
+    caller genuinely needs it. Debugged 2026-09-08 (multi-env smoke test,
+    jobs 516153-516156): rigid_body_states/object_pos in THIS codebase are
+    already reported in each env's own LOCAL frame (env1's workspace center
+    read ~0.13, same ballpark as env0's, not offset by its own +3.0 grid
+    spacing) -- confirming bidexhands/tasks/shadow_hand_point_cloud.py's own
+    multi-env camera code (same literal Vec3 for every env) is correct as
+    written for the SAME reason: no per-env offset ever needed subtracting,
+    since positions are already local. An earlier version of this file
+    subtracted this origin before set_camera_location/projection, which
+    actively broke every env but env 0 (whose origin genuinely is (0,0,0),
+    making the subtraction a no-op there) by introducing a phantom -3.0m
+    shift for env 1. Left in place, unused, as a documented dead end."""
     origin = task.gym.get_env_origin(task.envs[env_idx])
     return np.asarray([origin.x, origin.y, origin.z], dtype=np.float32)
 
@@ -131,18 +132,13 @@ def position_chest_camera_env(task, camera, env_idx):
     target_offset = parse_vec3_env("BIDEX_CHEST_TARGET_OFFSET", "0.0,0.0,0.02")
     eye = obj + eye_offset
     target = obj + target_offset
-    origin = env_origin(task, env_idx)
-    eye_local = eye - origin
-    target_local = target - origin
     if os.environ.get("GT_POSE_CROP_DEBUG") == "1":
-        print(f"[multi_env_camera debug] env={env_idx} obj(world)={obj.tolist()} "
-              f"origin={origin.tolist()} eye_local={eye_local.tolist()} target_local={target_local.tolist()}",
-              flush=True)
+        print(f"[multi_env_camera debug] env={env_idx} obj(env-local)={obj.tolist()} "
+              f"eye={eye.tolist()} target={target.tolist()}", flush=True)
     task.gym.set_camera_location(
-        camera, task.envs[env_idx],
-        gymapi.Vec3(*eye_local.tolist()), gymapi.Vec3(*target_local.tolist())
+        camera, task.envs[env_idx], gymapi.Vec3(*eye.tolist()), gymapi.Vec3(*target.tolist())
     )
-    return eye, target  # world-frame, for logging/consistency with the single-env functions
+    return eye, target
 
 
 def position_ego_camera_env(task, camera, palm_handle, env_idx):
@@ -160,12 +156,10 @@ def position_ego_camera_env(task, camera, palm_handle, env_idx):
     backoff = float(os.environ.get("BIDEX_EGO_BACKOFF_M", "0.05"))
     up = float(os.environ.get("BIDEX_EGO_UP_M", "0.14"))
     eye = palm_xyz + backoff * away + np.asarray([0.0, 0.0, up], dtype=np.float32)
-    origin = env_origin(task, env_idx)
     task.gym.set_camera_location(
-        camera, task.envs[env_idx],
-        gymapi.Vec3(*(eye - origin).tolist()), gymapi.Vec3(*(obj - origin).tolist())
+        camera, task.envs[env_idx], gymapi.Vec3(*eye.tolist()), gymapi.Vec3(*obj.tolist())
     )
-    return eye, obj  # world-frame, for logging/consistency with the single-env functions
+    return eye, obj
 
 
 def position_camera_env(task, camera, palm_handle, env_idx):
