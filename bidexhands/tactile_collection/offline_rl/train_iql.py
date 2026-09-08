@@ -86,6 +86,12 @@ def main():
     ap.add_argument("--n_steps_per_epoch", type=int, default=1000)
     ap.add_argument("--batch_size", type=int, default=256)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--expectile", type=float, default=None,
+                     help="IQL's expectile-regression tau for fitting V(s) toward the upper tail of "
+                          "Q(s,a) (d3rlpy default 0.7, tuned for mixed-quality D4RL-style datasets). "
+                          "Our manifests are ALL successful episodes -- worth sweeping away from the "
+                          "default to see whether that mismatch matters for us. Left unset (None) "
+                          "uses d3rlpy's own IQLConfig default, unchanged from all earlier runs.")
     ap.add_argument("--device", default=None,
                      help="e.g. 'cuda:0' or 'cpu:0'; default auto-detects CUDA")
     ap.add_argument("--wandb_project", default=None)
@@ -120,8 +126,11 @@ def main():
     # d3rlpy's real v2.8.1 source) -- no extra fit step needed here. Applying
     # this to EVERY arm (not just p_gt_tac) keeps p_only comparable/consistent,
     # and costs nothing for p_only's own naturally-small-scale proprio-only obs.
-    iql = IQLConfig(batch_size=args.batch_size,
-                     observation_scaler=StandardObservationScaler()).create(device=device)
+    iql_kwargs = dict(batch_size=args.batch_size, observation_scaler=StandardObservationScaler())
+    if args.expectile is not None:
+        iql_kwargs["expectile"] = args.expectile
+        print(f"[train] expectile override: {args.expectile} (d3rlpy default is 0.7)", flush=True)
+    iql = IQLConfig(**iql_kwargs).create(device=device)
 
     logger_adapter = _build_logger_adapter(args.out, args.wandb_project, args.wandb_name)
     experiment_name = os.path.basename(os.path.normpath(args.out))
