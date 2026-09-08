@@ -204,18 +204,32 @@ def build_bimanual_boxes_all_envs(task, cameras, palm_handles, width, height):
     and projects that env's own GT hand geometry -- one call per PPO tick
     covers all num_envs environments. Returns a list of `sides` dicts
     (possibly {} for an env with no hand in frame) and parallel eye/target
-    lists, same order as `cameras`/`palm_handles`/task.envs."""
+    lists, same order as `cameras`/`palm_handles`/task.envs.
+
+    Positions ALL envs' cameras first, THEN does one step_graphics +
+    render_all_camera_sensors pass, THEN queries view/proj matrices --
+    debugged 2026-09-08 (jobs 516153-516157): every env but env 0 produced
+    zero candidates no matter how the eye/target coordinate math was fixed,
+    which pointed away from a coordinate-frame bug and toward
+    get_camera_view_matrix not reflecting a just-set transform until a
+    render pass has actually happened for that camera."""
     from tactile_collection.multi_env_camera import position_camera_env
 
-    all_sides, eyes, targets = [], [], []
+    eyes, targets = [], []
     for i in range(task.num_envs):
         eye, target = position_camera_env(task, cameras[i], palm_handles[i], i)
-        view_matrix = task.gym.get_camera_view_matrix(task.sim, task.envs[i], cameras[i])
-        proj_matrix = task.gym.get_camera_proj_matrix(task.sim, task.envs[i], cameras[i])
-        sides = gt_hand_boxes_env(task, view_matrix, proj_matrix, width, height, i)
-        all_sides.append(sides)
         eyes.append(eye)
         targets.append(target)
+
+    task.gym.fetch_results(task.sim, True)
+    task.gym.step_graphics(task.sim)
+    task.gym.render_all_camera_sensors(task.sim)
+
+    all_sides = []
+    for i in range(task.num_envs):
+        view_matrix = task.gym.get_camera_view_matrix(task.sim, task.envs[i], cameras[i])
+        proj_matrix = task.gym.get_camera_proj_matrix(task.sim, task.envs[i], cameras[i])
+        all_sides.append(gt_hand_boxes_env(task, view_matrix, proj_matrix, width, height, i))
     return all_sides, eyes, targets
 
 
