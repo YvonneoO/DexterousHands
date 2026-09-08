@@ -144,15 +144,26 @@ def build_bimanual_boxes_from_task(task, camera, palm_handle, width, height):
 
 
 def _hand_link_points_env(task, actor_name, env_idx):
-    """rigid_body_states (and hence these points) are already reported in
-    each env's own local frame in this codebase -- confirmed empirically
-    2026-09-08 (multi-env smoke test debug output: env1's workspace center
-    read the same ballpark as env0's, not offset by its own grid spacing).
-    No origin conversion needed -- see multi_env_camera.env_origin's
-    docstring for the dead-end version of this file that subtracted one."""
-    from tactile_collection.multi_env_camera import rigid_body_positions_env
+    """rigid_body_states (and hence these points) are reported in each env's
+    own LOCAL frame, but get_camera_view_matrix/get_camera_proj_matrix
+    return the camera's transform in the shared GLOBAL frame -- confirmed
+    2026-09-08 by reverse-engineering the view matrix's translation row for
+    env 1 (its implied eye position was exactly local_eye + env_origin, even
+    though set_camera_location was called with local_eye: Isaac Gym adds the
+    env's own origin internally for that call, but the matrix getters return
+    the resulting post-addition global transform). So points must be
+    converted to global (add env_origin) before projecting with those
+    matrices -- the opposite of an earlier attempt that subtracted it (see
+    multi_env_camera.env_origin's docstring for that dead end, and this same
+    function's own prior revision for the "no conversion" dead end that
+    followed it -- both were wrong in the same way, just at different
+    signs/zero)."""
+    from tactile_collection.multi_env_camera import env_origin, rigid_body_positions_env
     idx = actor_named_body_env_indices(task, actor_name, HAND_LINK_PATTERNS)
-    return rigid_body_positions_env(task, idx, env_idx)
+    pts = rigid_body_positions_env(task, idx, env_idx)
+    if pts is None:
+        return None
+    return pts + env_origin(task, env_idx)[None, :]
 
 
 def gt_hand_boxes_env(task, view_matrix, proj_matrix, width, height, env_idx,
