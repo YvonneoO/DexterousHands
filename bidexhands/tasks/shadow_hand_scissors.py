@@ -144,10 +144,10 @@ class ShadowHandScissors(BaseTask):
         # can be "openai", "full_no_vel", "full", "full_state"
         self.obs_type = self.cfg["env"]["observationType"]
 
-        if not (self.obs_type in ["point_cloud", "full_state", "proprio_only", "proprio_gttac"]):
+        if not (self.obs_type in ["point_cloud", "full_state", "proprio_only", "proprio_gttac", "proprio_predtac"]):
             raise Exception(
                 "Unknown type of observations!\nobservationType should be one of: "
-                "[point_cloud, full_state, proprio_only, proprio_gttac]")
+                "[point_cloud, full_state, proprio_only, proprio_gttac, proprio_predtac]")
 
         print("Obs type:", self.obs_type)
 
@@ -162,6 +162,13 @@ class ShadowHandScissors(BaseTask):
             # coarse-tactile channel (force magnitude only), still minus the
             # object/scissors tail. See compute_proprio_gttac_state.
             "proprio_gttac": 362,
+            # tactile-SR ablation "P+Pred-tactile" arm: proprio_only + a
+            # 17-anatomical-link/hand tactile channel SOURCED FROM the online
+            # tactile-prediction model (not GT sim contact) -- 17 max-pooled
+            # continuous values + 17 taxel-level-threshold binary contact
+            # flags, per hand. See compute_proprio_predtac_state and
+            # shadow_hand_pen.py's own identical implementation.
+            "proprio_predtac": 406,
         }
         self.num_hand_obs = 72 + 95 + 26 + 6
         self.up_axis = 'z'
@@ -870,6 +877,8 @@ class ShadowHandScissors(BaseTask):
             self.compute_proprio_only_state()
         elif self.obs_type == "proprio_gttac":
             self.compute_proprio_gttac_state()
+        elif self.obs_type == "proprio_predtac":
+            self.compute_proprio_predtac_state()
 
         if self.asymmetric_obs:
             self.compute_full_state(True)
@@ -1016,6 +1025,111 @@ class ShadowHandScissors(BaseTask):
             self.tactile_extra_obs_scale * torch.norm(left_extra_forces, dim=-1)
 
         hand_another_pose_start = tactile_another_obs_start + self.num_tactile_extra
+        self.obs_buf[:, hand_another_pose_start:hand_another_pose_start + 3] = self.left_hand_pos
+        self.obs_buf[:, hand_another_pose_start+3:hand_another_pose_start+4] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[0].unsqueeze(-1)
+        self.obs_buf[:, hand_another_pose_start+4:hand_another_pose_start+5] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[1].unsqueeze(-1)
+        self.obs_buf[:, hand_another_pose_start+5:hand_another_pose_start+6] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[2].unsqueeze(-1)
+
+        action_another_obs_start = hand_another_pose_start + 6
+        self.obs_buf[:, action_another_obs_start:action_another_obs_start + 26] = self.actions[:, 26:]
+        # (object/goal tail intentionally omitted entirely -- not proprioception, matches proprio_only)
+
+    def _predtac_lazy_init(self):
+        """First-call setup for the "proprio_predtac" arm -- identical to
+        shadow_hand_pen.py's own _predtac_lazy_init, see there for the full
+        rationale (one Isaac Gym camera per env + the IPC client talking to
+        Ego2Contact's predtac_server.py)."""
+        import os
+
+        os.environ.setdefault("BIDEX_CAMERA_MODE", "chest")
+        os.environ.setdefault("BIDEX_CHEST_TARGET_MODE", "workspace")
+        os.environ.setdefault("BIDEX_CHEST_TARGET_CENTER", "bbox")
+        os.environ.setdefault("BIDEX_CHEST_TARGET_SMOOTHING", "0.0")
+        os.environ.setdefault("BIDEX_CHEST_EYE_OFFSET", "0.32,0.0,0.80")
+        os.environ.setdefault("BIDEX_CHEST_TARGET_OFFSET", "0.0,0.0,0.08")
+        os.environ.setdefault("BIDEX_HAND_COLOR_SAME", "1")
+
+        from tactile_collection.multi_env_camera import apply_visual_style_all_envs, create_cameras
+        from tactile_collection.predtac_client import PredTacClient
+
+        run_id = os.environ.get("PREDTAC_RUN_ID")
+        if not run_id:
+            raise RuntimeError("PREDTAC_RUN_ID must be set in the environment for observationType=proprio_predtac "
+                                "(shared with the predtac_server.py process watching the same run_id)")
+        self._predtac_width = int(os.environ.get("PREDTAC_WIDTH", "960"))
+        self._predtac_height = int(os.environ.get("PREDTAC_HEIGHT", "720"))
+        apply_visual_style_all_envs(self)
+        self._predtac_cameras, self._predtac_palm_handles, _palm_name = create_cameras(
+            self, self._predtac_width, self._predtac_height)
+        self._predtac_client = PredTacClient(run_id, self.num_envs)
+        print(f"[proprio_predtac] initialized {self.num_envs} cameras, run_id={run_id}, "
+              f"size={self._predtac_width}x{self._predtac_height}", flush=True)
+
+    def compute_proprio_predtac_state(self):
+        """
+        Tactile-SR ablation "P+Pred-tactile" arm -- identical structure to
+        shadow_hand_pen.py's compute_proprio_predtac_state (see there for the
+        full docstring/layout table); reproduced here since Scissors' proprio
+        block is byte-for-byte the same layout as Pen's.
+        """
+        import numpy as np
+        import torch as _torch
+
+        from tactile_collection.gt_pose_crop import build_bimanual_boxes_all_envs
+        from tactile_collection.multi_env_camera import render_all_and_capture
+
+        if not hasattr(self, "_predtac_client"):
+            self._predtac_lazy_init()
+
+        sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
+            self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
+        frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
+        self._predtac_client.submit(frames, sides_all_envs)
+        continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
+
+        num_links = continuous_np.shape[-1]
+        continuous = _torch.from_numpy(continuous_np).to(self.device)
+        binary = _torch.from_numpy(binary_np).to(self.device)
+        right_tactile = _torch.cat([continuous[:, 1, :], binary[:, 1, :]], dim=-1)
+        left_tactile = _torch.cat([continuous[:, 0, :], binary[:, 0, :]], dim=-1)
+
+        num_ft_states = 13 * int(self.num_fingertips / 2)  # 65
+        tactile_dim = 2 * num_links  # 34
+
+        self.obs_buf[:, 0:self.num_shadow_hand_dofs] = unscale(self.shadow_hand_dof_pos,
+                                                            self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
+        self.obs_buf[:, self.num_shadow_hand_dofs:2*self.num_shadow_hand_dofs] = self.vel_obs_scale * self.shadow_hand_dof_vel
+        self.obs_buf[:, 2*self.num_shadow_hand_dofs:3*self.num_shadow_hand_dofs] = self.force_torque_obs_scale * self.dof_force_tensor[:, :24]
+
+        fingertip_obs_start = 72
+        self.obs_buf[:, fingertip_obs_start:fingertip_obs_start + num_ft_states] = self.fingertip_state.reshape(self.num_envs, num_ft_states)
+
+        tactile_obs_start = fingertip_obs_start + num_ft_states
+        self.obs_buf[:, tactile_obs_start:tactile_obs_start + tactile_dim] = right_tactile
+
+        hand_pose_start = tactile_obs_start + tactile_dim
+        self.obs_buf[:, hand_pose_start:hand_pose_start + 3] = self.right_hand_pos
+        self.obs_buf[:, hand_pose_start+3:hand_pose_start+4] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[0].unsqueeze(-1)
+        self.obs_buf[:, hand_pose_start+4:hand_pose_start+5] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[1].unsqueeze(-1)
+        self.obs_buf[:, hand_pose_start+5:hand_pose_start+6] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[2].unsqueeze(-1)
+
+        action_obs_start = hand_pose_start + 6
+        self.obs_buf[:, action_obs_start:action_obs_start + 26] = self.actions[:, :26]
+
+        # another_hand
+        another_hand_start = action_obs_start + 26
+        self.obs_buf[:, another_hand_start:self.num_shadow_hand_dofs + another_hand_start] = unscale(self.shadow_hand_another_dof_pos,
+                                                            self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
+        self.obs_buf[:, self.num_shadow_hand_dofs + another_hand_start:2*self.num_shadow_hand_dofs + another_hand_start] = self.vel_obs_scale * self.shadow_hand_another_dof_vel
+        self.obs_buf[:, 2*self.num_shadow_hand_dofs + another_hand_start:3*self.num_shadow_hand_dofs + another_hand_start] = self.force_torque_obs_scale * self.dof_force_tensor[:, 24:48]
+
+        fingertip_another_obs_start = another_hand_start + 72
+        self.obs_buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
+
+        tactile_another_obs_start = fingertip_another_obs_start + num_ft_states
+        self.obs_buf[:, tactile_another_obs_start:tactile_another_obs_start + tactile_dim] = left_tactile
+
+        hand_another_pose_start = tactile_another_obs_start + tactile_dim
         self.obs_buf[:, hand_another_pose_start:hand_another_pose_start + 3] = self.left_hand_pos
         self.obs_buf[:, hand_another_pose_start+3:hand_another_pose_start+4] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[0].unsqueeze(-1)
         self.obs_buf[:, hand_another_pose_start+4:hand_another_pose_start+5] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[1].unsqueeze(-1)
