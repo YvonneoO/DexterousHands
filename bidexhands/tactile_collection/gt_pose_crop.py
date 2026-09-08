@@ -36,6 +36,8 @@ smoke test (gt_pose_crop_smoke.py, same directory) is for. Run this file
 directly for a numpy-only self-test of the projection algebra (no Isaac Gym
 required -- safe to run locally, e.g. for a quick regression check).
 """
+import os
+
 import numpy as np
 
 # Reused unchanged from the real data-collection camera code -- do not
@@ -159,12 +161,21 @@ def gt_hand_boxes_env(task, view_matrix, proj_matrix, width, height, env_idx,
                        pad_frac=PAD_FRAC, min_pad_px=MIN_PAD_PX):
     """Same as gt_hand_boxes, but reads env_idx's own rigid-body state row
     instead of always env 0 -- for online PPO with num_envs > 1."""
+    debug = os.environ.get("GT_POSE_CROP_DEBUG") == "1"
     candidates = []
     for actor_name in HAND_ACTORS:
         pts = _hand_link_points_env(task, actor_name, env_idx)
+        if debug:
+            from tactile_collection.multi_env_camera import env_origin
+            print(f"[gt_pose_crop debug] env={env_idx} actor={actor_name} "
+                  f"origin={env_origin(task, env_idx).tolist()} "
+                  f"pts={None if pts is None else pts.tolist()}", flush=True)
         if pts is None or len(pts) == 0:
             continue
         u, v, in_front = project_world_to_pixel(pts, view_matrix, proj_matrix, width, height)
+        if debug:
+            print(f"[gt_pose_crop debug] env={env_idx} actor={actor_name} "
+                  f"u={u.tolist()} v={v.tolist()} in_front={in_front.tolist()}", flush=True)
         if not np.any(in_front):
             continue
         u_k, v_k = u[in_front], v[in_front]
