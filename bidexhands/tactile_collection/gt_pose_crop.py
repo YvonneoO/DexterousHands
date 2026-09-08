@@ -229,6 +229,11 @@ def build_bimanual_boxes_all_envs(task, cameras, palm_handles, width, height):
     for i in range(task.num_envs):
         view_matrix = task.gym.get_camera_view_matrix(task.sim, task.envs[i], cameras[i])
         proj_matrix = task.gym.get_camera_proj_matrix(task.sim, task.envs[i], cameras[i])
+        if os.environ.get("GT_POSE_CROP_DEBUG") == "1":
+            import numpy as _np
+            print(f"[gt_pose_crop debug] env={i} camera={cameras[i]} "
+                  f"view_matrix={_np.asarray(view_matrix).tolist()} "
+                  f"proj_matrix={_np.asarray(proj_matrix).tolist()}", flush=True)
         all_sides.append(gt_hand_boxes_env(task, view_matrix, proj_matrix, width, height, i))
     return all_sides, eyes, targets
 
