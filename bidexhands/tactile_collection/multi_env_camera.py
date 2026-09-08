@@ -40,6 +40,24 @@ from tactile_collection.rollout_tactile_rgb_chest import (  # noqa: E402
 HAND_ACTORS = ("hand", "another_hand")
 
 
+def env_origin(task, env_idx):
+    """Isaac Gym's per-env local origin, as a (3,) numpy array. set_camera_
+    location's eye/target are in EACH ENV'S OWN LOCAL FRAME, not the shared
+    world frame rigid_body_states/object_pos are read in (confirmed against
+    bidexhands/tasks/shadow_hand_point_cloud.py's own multi-env camera setup,
+    which calls set_camera_location with the SAME literal Vec3 for every
+    env -- that only makes sense if the call is env-local). Subtract this
+    from any world-frame point before passing it to set_camera_location OR
+    before projecting it with that camera's view/proj matrices (both operate
+    in the camera's own env-local frame). Caught 2026-09-08: the single-env
+    code (rollout_tactile_rgb_chest.py, gt_pose_crop.py's non-"_env"
+    functions) never needed this because env 0's origin is (0,0,0) in this
+    codebase's env layout -- world-frame and env-local coincide there by
+    coincidence, which is why only env 0 "worked" before this fix."""
+    origin = task.gym.get_env_origin(task.envs[env_idx])
+    return np.asarray([origin.x, origin.y, origin.z], dtype=np.float32)
+
+
 def env_row(value, num_envs, env_idx):
     arr = as_numpy(value)
     if arr.ndim and arr.shape[0] == num_envs:
@@ -113,10 +131,12 @@ def position_chest_camera_env(task, camera, env_idx):
     target_offset = parse_vec3_env("BIDEX_CHEST_TARGET_OFFSET", "0.0,0.0,0.02")
     eye = obj + eye_offset
     target = obj + target_offset
+    origin = env_origin(task, env_idx)
     task.gym.set_camera_location(
-        camera, task.envs[env_idx], gymapi.Vec3(*eye.tolist()), gymapi.Vec3(*target.tolist())
+        camera, task.envs[env_idx],
+        gymapi.Vec3(*(eye - origin).tolist()), gymapi.Vec3(*(target - origin).tolist())
     )
-    return eye, target
+    return eye, target  # world-frame, for logging/consistency with the single-env functions
 
 
 def position_ego_camera_env(task, camera, palm_handle, env_idx):
@@ -134,10 +154,12 @@ def position_ego_camera_env(task, camera, palm_handle, env_idx):
     backoff = float(os.environ.get("BIDEX_EGO_BACKOFF_M", "0.05"))
     up = float(os.environ.get("BIDEX_EGO_UP_M", "0.14"))
     eye = palm_xyz + backoff * away + np.asarray([0.0, 0.0, up], dtype=np.float32)
+    origin = env_origin(task, env_idx)
     task.gym.set_camera_location(
-        camera, task.envs[env_idx], gymapi.Vec3(*eye.tolist()), gymapi.Vec3(*obj.tolist())
+        camera, task.envs[env_idx],
+        gymapi.Vec3(*(eye - origin).tolist()), gymapi.Vec3(*(obj - origin).tolist())
     )
-    return eye, obj
+    return eye, obj  # world-frame, for logging/consistency with the single-env functions
 
 
 def position_camera_env(task, camera, palm_handle, env_idx):
