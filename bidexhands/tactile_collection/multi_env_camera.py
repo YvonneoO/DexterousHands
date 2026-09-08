@@ -132,9 +132,15 @@ def position_chest_camera_env(task, camera, env_idx):
     eye = obj + eye_offset
     target = obj + target_offset
     origin = env_origin(task, env_idx)
+    eye_local = eye - origin
+    target_local = target - origin
+    if os.environ.get("GT_POSE_CROP_DEBUG") == "1":
+        print(f"[multi_env_camera debug] env={env_idx} obj(world)={obj.tolist()} "
+              f"origin={origin.tolist()} eye_local={eye_local.tolist()} target_local={target_local.tolist()}",
+              flush=True)
     task.gym.set_camera_location(
         camera, task.envs[env_idx],
-        gymapi.Vec3(*(eye - origin).tolist()), gymapi.Vec3(*(target - origin).tolist())
+        gymapi.Vec3(*eye_local.tolist()), gymapi.Vec3(*target_local.tolist())
     )
     return eye, target  # world-frame, for logging/consistency with the single-env functions
 
