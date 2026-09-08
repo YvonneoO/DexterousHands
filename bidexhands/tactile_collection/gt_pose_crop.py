@@ -131,12 +131,75 @@ def gt_hand_boxes(task, view_matrix, proj_matrix, width, height,
 def build_bimanual_boxes_from_task(task, camera, palm_handle, width, height):
     """Full drop-in for the online pipeline's SAM3 step: position the SAME
     dynamic chest camera used at data-collection time, then project GT hand
-    geometry instead of running SAM3 detection on the rendered frame."""
+    geometry instead of running SAM3 detection on the rendered frame.
+    Single-env only (task.envs[0]) -- see gt_hand_boxes_env / build_bimanual_
+    boxes_all_envs below for the num_envs>1 (online PPO) version."""
     eye, target = position_camera(task, camera, palm_handle)
     view_matrix = task.gym.get_camera_view_matrix(task.sim, task.envs[0], camera)
     proj_matrix = task.gym.get_camera_proj_matrix(task.sim, task.envs[0], camera)
     sides = gt_hand_boxes(task, view_matrix, proj_matrix, width, height)
     return sides, eye, target
+
+
+def _hand_link_points_env(task, actor_name, env_idx):
+    from tactile_collection.multi_env_camera import rigid_body_positions_env
+    idx = actor_named_body_env_indices(task, actor_name, HAND_LINK_PATTERNS)
+    return rigid_body_positions_env(task, idx, env_idx)
+
+
+def gt_hand_boxes_env(task, view_matrix, proj_matrix, width, height, env_idx,
+                       pad_frac=PAD_FRAC, min_pad_px=MIN_PAD_PX):
+    """Same as gt_hand_boxes, but reads env_idx's own rigid-body state row
+    instead of always env 0 -- for online PPO with num_envs > 1."""
+    candidates = []
+    for actor_name in HAND_ACTORS:
+        pts = _hand_link_points_env(task, actor_name, env_idx)
+        if pts is None or len(pts) == 0:
+            continue
+        u, v, in_front = project_world_to_pixel(pts, view_matrix, proj_matrix, width, height)
+        if not np.any(in_front):
+            continue
+        u_k, v_k = u[in_front], v[in_front]
+        x1, x2 = float(u_k.min()), float(u_k.max())
+        y1, y2 = float(v_k.min()), float(v_k.max())
+        pad_x = max((x2 - x1) * pad_frac, min_pad_px)
+        pad_y = max((y2 - y1) * pad_frac, min_pad_px)
+        x1 = float(np.clip(x1 - pad_x, 0.0, width))
+        x2 = float(np.clip(x2 + pad_x, 0.0, width))
+        y1 = float(np.clip(y1 - pad_y, 0.0, height))
+        y2 = float(np.clip(y2 + pad_y, 0.0, height))
+        if (x2 - x1) < 1.0 or (y2 - y1) < 1.0:
+            continue
+        candidates.append({"actor": actor_name, "box": [x1, y1, x2, y2], "cx": (x1 + x2) / 2.0})
+
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda d: d["cx"])
+    sides = {"left": candidates[0]}
+    if len(candidates) > 1:
+        sides["right"] = candidates[-1]
+    return sides
+
+
+def build_bimanual_boxes_all_envs(task, cameras, palm_handles, width, height):
+    """Multi-env drop-in for the online PPO rollout loop: positions each
+    env's own dynamic chest camera (multi_env_camera.position_camera_env)
+    and projects that env's own GT hand geometry -- one call per PPO tick
+    covers all num_envs environments. Returns a list of `sides` dicts
+    (possibly {} for an env with no hand in frame) and parallel eye/target
+    lists, same order as `cameras`/`palm_handles`/task.envs."""
+    from tactile_collection.multi_env_camera import position_camera_env
+
+    all_sides, eyes, targets = [], [], []
+    for i in range(task.num_envs):
+        eye, target = position_camera_env(task, cameras[i], palm_handles[i], i)
+        view_matrix = task.gym.get_camera_view_matrix(task.sim, task.envs[i], cameras[i])
+        proj_matrix = task.gym.get_camera_proj_matrix(task.sim, task.envs[i], cameras[i])
+        sides = gt_hand_boxes_env(task, view_matrix, proj_matrix, width, height, i)
+        all_sides.append(sides)
+        eyes.append(eye)
+        targets.append(target)
+    return all_sides, eyes, targets
 
 
 def _reference_deproject_point(u, v, z, view_matrix_inv, proj_matrix, width, height):
