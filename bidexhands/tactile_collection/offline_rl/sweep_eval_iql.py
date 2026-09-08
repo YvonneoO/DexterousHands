@@ -318,14 +318,21 @@ def run_iql_rollout(ctx, policy, arm, prop_keys, episodes, object_body_indices, 
 
     while len(successes) < episodes:
         obs_row = build_live_observation(ctx, arm, prop_keys, object_body_indices, object_dof_indices)
-        obs_t = torch.as_tensor(obs_row, dtype=torch.float32, device=device)  # (1, obs_dim)
+        # CPU, not `device` (the sim's CUDA device) -- see torch.jit.load's own
+        # call site below for why: a StandardObservationScaler's mean/std end up
+        # baked into the traced graph as CPU-resident constants that
+        # map_location doesn't correctly remap, so the policy must run on CPU
+        # end-to-end (confirmed failing with a device-mismatch RuntimeError
+        # otherwise, 2026-09-07, job 514228/514229 -- the tiny MLP policy
+        # itself is nowhere near GPU-bound, this costs nothing measurable).
+        obs_t = torch.as_tensor(obs_row, dtype=torch.float32, device="cpu")  # (1, obs_dim)
 
         with torch.no_grad():
             # policy() IS the greedy/deterministic action (predict_best_action) --
             # see export_iql_policies.py's module docstring for the save_policy()
             # verification this call signature is based on. No numpy round-trip
             # needed, unlike the old d3rlpy `algo.predict(numpy_array)` this replaces.
-            action_t = policy(obs_t).reshape(1, action_dim)
+            action_t = policy(obs_t).reshape(1, action_dim).to(device)
             next_obs, rew, done, infos = env.step(action_t)
             obs.copy_(next_obs)
 
@@ -432,11 +439,17 @@ def main():
 
     curve = []
     for step, path in ckpts:
-        # map_location=ctx.device: the trace is device-tagged at export time to
-        # whatever --device export_iql_policies.py ran with (default cpu:0), which
-        # will usually differ from this live rollout's cuda device -- see that
-        # script's module docstring for why the export device doesn't need to match.
-        policy = torch.jit.load(path, map_location=ctx.device)
+        # map_location="cpu", NOT ctx.device (the sim's cuda device): a
+        # StandardObservationScaler's mean/std (see train_iql.py) get baked into
+        # the traced graph as constants that map_location does not reliably
+        # migrate off their export-time device (cpu:0, export_iql_policies.py's
+        # default) -- loading onto cuda left those constants stuck on CPU while
+        # the input was on GPU, a device-mismatch RuntimeError confirmed
+        # 2026-09-07 (jobs 514228/514229) the moment the scaler fix (commit
+        # 1f8e8a8) started actually setting a scaler. Running the whole policy on
+        # CPU sidesteps this entirely; run_iql_rollout builds obs_t on CPU and
+        # moves the resulting action back to ctx.device for env.step() to consume.
+        policy = torch.jit.load(path, map_location="cpu")
         policy.eval()
         successes = run_iql_rollout(
             ctx, policy, args.arm, prop_keys, args.episodes, object_body_indices, object_dof_indices,
