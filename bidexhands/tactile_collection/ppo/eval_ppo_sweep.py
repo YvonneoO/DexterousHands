@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep every saved checkpoint from a PPO training run (model_<iter>.pt) through
+"""Sweep saved checkpoints from a PPO training run (model_<iter>.pt) through
 a success-rate eval, logging a success-rate-vs-iteration curve to wandb -- mirrors
 tactile_collection/bc/sweep_eval_bc_student.py's "quick biased eval per checkpoint,
 trustworthy final eval on the last one" pattern, retargeted at bidexhands' own
@@ -13,6 +13,18 @@ uploads the final checkpoint + that JSON to HF under
 tactile_sr_ablation/bidexhands/<hf_name>/, matching the pen_ponly_seed0 convention
 already established there.
 
+--latest_only (added for vision_ppo_watch_backup.sbatch, a live watcher that
+re-invokes this script every ~10 min against a STILL-RUNNING training job):
+without it, every invocation re-evaluates EVERY checkpoint found so far --
+correct for a one-shot post-hoc sweep, but means each watcher tick gets
+strictly more expensive than the last as checkpoints pile up, purely
+re-deriving numbers it already has. With --latest_only, the script loads
+whatever curve is already saved in eval_sweep_result.json, evaluates ONLY
+the single newest checkpoint not already in that curve (skips entirely,
+with no GPU work at all, if there is none -- the common case between
+checkpoint saves), and merges the one new point into the existing curve
+rather than overwriting it.
+
 Run as (bidexhands's own args after `--`, same split convention as
 sweep_eval_bc_student.py):
     cd <DexterousHands root>/bidexhands
@@ -20,7 +32,7 @@ sweep_eval_bc_student.py):
         --ckpt_dir logs/ShadowHandPen/ppo/ppo_seed42 \
         --hf_name pen_gttac_seed42 \
         --wandb_run_name pen_gttac_seed42 --wandb_group ShadowHandPen \
-        --episodes_per_ckpt 30 --final_episodes 100 \
+        --episodes_per_ckpt 30 --final_episodes 100 [--latest_only] \
         -- --task ShadowHandPen --algo ppo \
            --cfg_env cfg/ShadowHandPenProprioGTTac.yaml --num_envs 256 --headless --seed 1234
 """
@@ -76,6 +88,10 @@ def main():
     ap.add_argument("--wandb_project", default="ego2contact-ppo-ablation")
     ap.add_argument("--wandb_run_name", default=None)
     ap.add_argument("--wandb_group", default=None)
+    ap.add_argument("--latest_only", action="store_true",
+                     help="only evaluate the newest not-yet-evaluated checkpoint, merging into the "
+                          "existing eval_sweep_result.json instead of re-sweeping everything -- see "
+                          "module docstring. Exits immediately (no GPU work) if there's nothing new.")
     args, unknown = ap.parse_known_args()
     # parse_known_args leaves a literal "--" separator in `unknown` if the
     # caller passed one to mark where bidexhands' own args start; bidexhands'
@@ -87,6 +103,26 @@ def main():
     if not ckpts:
         raise RuntimeError(f"no model_<iter>.pt checkpoints found under {args.ckpt_dir}")
     print(f"[sweep] {len(ckpts)} checkpoints: iterations {[it for it, _ in ckpts]}", flush=True)
+
+    result_path = os.path.join(args.ckpt_dir, "eval_sweep_result.json")
+    existing_curve = []
+    if args.latest_only:
+        if os.path.exists(result_path):
+            try:
+                with open(result_path) as f:
+                    existing_curve = json.load(f).get("curve", [])
+            except (json.JSONDecodeError, OSError):
+                existing_curve = []
+        known_iters = {pt["iteration"] for pt in existing_curve}
+        newest_it, newest_path = ckpts[-1]
+        if newest_it in known_iters:
+            print(f"[sweep] --latest_only: newest checkpoint (iteration={newest_it}) already evaluated, "
+                  f"nothing to do -- exiting", flush=True)
+            print("SWEEP_EVAL_DONE", flush=True)
+            return
+        ckpts = [(newest_it, newest_path)]
+        print(f"[sweep] --latest_only: evaluating just iteration={newest_it} "
+              f"({len(existing_curve)} prior points already in {result_path})", flush=True)
 
     # bidexhands' get_args() parses from sys.argv directly (no explicit argv
     # param) -- same pattern used everywhere else in this repo (train.py,
@@ -120,7 +156,7 @@ def main():
     else:
         print("[wandb] wandb not installed -- sweep will run without logging", flush=True)
 
-    curve = []
+    curve = list(existing_curve)
     last_it, last_path = ckpts[-1]
     for it, path in ckpts:
         model.test(path)
@@ -149,7 +185,6 @@ def main():
         "curve": curve,
         "wandb_run_url": run.url if run is not None else None,
     }
-    result_path = os.path.join(args.ckpt_dir, "eval_sweep_result.json")
     with open(result_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"[sweep] wrote {result_path}", flush=True)
