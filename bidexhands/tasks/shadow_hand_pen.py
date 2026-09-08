@@ -1053,8 +1053,15 @@ class ShadowHandPen(BaseTask):
         os.environ.setdefault("BIDEX_CHEST_TARGET_SMOOTHING", "0.0")
         os.environ.setdefault("BIDEX_CHEST_EYE_OFFSET", "0.32,0.0,0.80")
         os.environ.setdefault("BIDEX_CHEST_TARGET_OFFSET", "0.0,0.0,0.08")
+        # Default ON here (unlike rollout_tactile_rgb_chest.apply_visual_style's
+        # own off-by-default): online frames feed the tactile-prediction model
+        # directly, so every env's hands need the SAME gray-blue color the
+        # model was trained on, not Isaac Gym's default per-actor coloring
+        # (confirmed to differ per env -- see gt_pose_crop_smoke_multienv.py's
+        # own debug images, red/cyan for env0, blue/green for env1, ...).
+        os.environ.setdefault("BIDEX_HAND_COLOR_SAME", "1")
 
-        from tactile_collection.multi_env_camera import create_cameras
+        from tactile_collection.multi_env_camera import apply_visual_style_all_envs, create_cameras
         from tactile_collection.predtac_client import PredTacClient
 
         run_id = os.environ.get("PREDTAC_RUN_ID")
@@ -1063,6 +1070,7 @@ class ShadowHandPen(BaseTask):
                                 "(shared with the predtac_server.py process watching the same run_id)")
         self._predtac_width = int(os.environ.get("PREDTAC_WIDTH", "960"))
         self._predtac_height = int(os.environ.get("PREDTAC_HEIGHT", "720"))
+        apply_visual_style_all_envs(self)
         self._predtac_cameras, self._predtac_palm_handles, _palm_name = create_cameras(
             self, self._predtac_width, self._predtac_height)
         self._predtac_client = PredTacClient(run_id, self.num_envs)

@@ -34,10 +34,43 @@ from tactile_collection.rollout_tactile_rgb_chest import (  # noqa: E402
     actor_named_body_env_indices,
     actor_body_env_indices,
     as_numpy,
+    parse_bool_env,
     parse_vec3_env,
 )
 
 HAND_ACTORS = ("hand", "another_hand")
+
+
+def apply_visual_style_all_envs(task):
+    """Per-env generalization of rollout_tactile_rgb_chest.apply_visual_style
+    (same BIDEX_HAND_COLOR_SAME / BIDEX_HAND_COLOR_RGB / BIDEX_OBJECT_COLOR_RGB
+    convention, same default gray-blue hand color) -- that function only ever
+    colored task.envs[0], which is correct for num_envs=1 data collection but
+    leaves every other env's hand at Isaac Gym's own default (effectively
+    random-looking, distinct-per-actor) material. Online Pred-Tac rendering
+    feeds these frames straight into the tactile-prediction model, so every
+    env's hands need to match the color the model was actually trained on,
+    not just env 0's."""
+    if not parse_bool_env("BIDEX_HAND_COLOR_SAME", False):
+        return
+    from isaacgym import gymapi
+
+    hand_color = parse_vec3_env("BIDEX_HAND_COLOR_RGB", "0.42,0.52,0.56")
+    object_color = parse_vec3_env("BIDEX_OBJECT_COLOR_RGB", "0.54,0.48,0.38")
+    for env_idx in range(task.num_envs):
+        for actor_name, color in (
+            ("hand", hand_color),
+            ("another_hand", hand_color),
+            ("object", object_color),
+        ):
+            actor = task.gym.find_actor_handle(task.envs[env_idx], actor_name)
+            if actor < 0:
+                continue
+            body_count = task.gym.get_actor_rigid_body_count(task.envs[env_idx], actor)
+            for body_id in range(body_count):
+                task.gym.set_rigid_body_color(
+                    task.envs[env_idx], actor, body_id, gymapi.MESH_VISUAL, gymapi.Vec3(*color.tolist())
+                )
 
 
 def env_origin(task, env_idx):

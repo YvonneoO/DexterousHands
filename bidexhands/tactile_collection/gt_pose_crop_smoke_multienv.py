@@ -27,6 +27,7 @@ os.environ.setdefault("BIDEX_CHEST_TARGET_CENTER", "bbox")
 os.environ.setdefault("BIDEX_CHEST_TARGET_SMOOTHING", "0.0")
 os.environ.setdefault("BIDEX_CHEST_EYE_OFFSET", "0.32,0.0,0.80")
 os.environ.setdefault("BIDEX_CHEST_TARGET_OFFSET", "0.0,0.0,0.08")
+os.environ.setdefault("BIDEX_HAND_COLOR_SAME", "1")
 
 import cv2  # noqa: E402
 
@@ -35,8 +36,7 @@ from bidexhands.utils.parse_task import parse_task  # noqa: E402
 from bidexhands.utils.process_marl import get_AgentIndex  # noqa: E402
 import torch  # noqa: E402
 
-from tactile_collection.rollout_tactile_rgb_chest import apply_visual_style  # noqa: E402
-from tactile_collection.multi_env_camera import create_cameras, render_all_and_capture  # noqa: E402
+from tactile_collection.multi_env_camera import apply_visual_style_all_envs, create_cameras, render_all_and_capture  # noqa: E402
 from tactile_collection.gt_pose_crop import build_bimanual_boxes_all_envs  # noqa: E402
 
 
@@ -59,7 +59,7 @@ def main():
     sim_params = parse_sim_params(args, cfg, cfg_train)
     set_seed(cfg_train.get("seed", -1), cfg_train.get("torch_deterministic", False))
     task, env = parse_task(args, cfg, cfg_train, sim_params, get_AgentIndex(cfg))
-    apply_visual_style(task)
+    apply_visual_style_all_envs(task)
 
     width = int(os.environ.get("BIDEX_VIDEO_WIDTH", "960"))
     height = int(os.environ.get("BIDEX_VIDEO_HEIGHT", "720"))
