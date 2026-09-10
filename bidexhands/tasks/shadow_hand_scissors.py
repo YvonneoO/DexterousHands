@@ -96,6 +96,21 @@ class ShadowHandScissors(BaseTask):
         # run's raw values and adjust if they still saturate the clamp often.
         self.tactile_extra_obs_scale = 0.1
 
+        # P+Pred-Tac's continuous (pooled predicted-pressure) channel, unlike
+        # GT-Tac above, was found UNSCALED and never saturating the +-5.0
+        # clamp -- the opposite problem: real measured values (predtac_server
+        # diagnostic, job 517302/517683, num_envs=64) are p50~0.0005,
+        # p90~0.05-0.08, max~0.6-0.7 pooled -- ~1000x smaller than the other
+        # proprio channels it's concatenated next to, likely close to
+        # invisible to a from-scratch flat-MLP policy without amplification.
+        # 20.0 brings the typical active (p90) value to ~1.0-1.5, matching
+        # GT-Tac's own scaled-channel mean (~1.0) above, with only rare tail
+        # spikes (raw max*20 ~ 12-14) exceeding the clamp -- same "clip only
+        # the tail, not the bulk" pattern GT-Tac already established. binary
+        # (0/1 contact) is NOT scaled -- already comparable magnitude to
+        # everything else.
+        self.predtac_continuous_obs_scale = 20.0
+
         self.reset_position_noise = self.cfg["env"]["resetPositionNoise"]
         self.reset_rotation_noise = self.cfg["env"]["resetRotationNoise"]
         self.reset_dof_pos_noise = self.cfg["env"]["resetDofPosRandomInterval"]
@@ -1096,8 +1111,8 @@ class ShadowHandScissors(BaseTask):
                   f"stale_ticks={_stale}", flush=True)
 
         num_links = continuous_np.shape[-1]
-        continuous = _torch.from_numpy(continuous_np).to(self.device)
-        binary = _torch.from_numpy(binary_np).to(self.device)
+        continuous = self.predtac_continuous_obs_scale * _torch.from_numpy(continuous_np).to(self.device)
+        binary = _torch.from_numpy(binary_np).to(self.device)  # already 0/1 -- no scale needed
         right_tactile = _torch.cat([continuous[:, 1, :], binary[:, 1, :]], dim=-1)
         left_tactile = _torch.cat([continuous[:, 0, :], binary[:, 0, :]], dim=-1)
 
