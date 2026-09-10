@@ -140,19 +140,28 @@ def main():
     # below via model.test(path), one env/sim build reused across all of them.
     model = process_sarl(bidex_args, env, cfg_train, logdir)
 
+    # wandb is logging-only, not on the critical path to actually evaluating
+    # checkpoints and uploading them to HF -- a wandb.init() failure (auth,
+    # network, rate limit) must not abort the whole sweep. Found 2026-09-10:
+    # an unguarded wandb.init() killed main() before any checkpoint was ever
+    # loaded, silently swallowed by the watcher sbatch's "non-fatal" catch.
     run = None
     if wandb is not None:
-        run = wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            group=args.wandb_group,
-            config={
-                "task": bidex_args.task, "cfg_env": bidex_args.cfg_env,
-                "ckpt_dir": args.ckpt_dir, "episodes_per_ckpt": args.episodes_per_ckpt,
-                "final_episodes": args.final_episodes,
-            },
-        )
-        print(f"[wandb] started run {run.id} ({run.url})", flush=True)
+        try:
+            run = wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name,
+                group=args.wandb_group,
+                config={
+                    "task": bidex_args.task, "cfg_env": bidex_args.cfg_env,
+                    "ckpt_dir": args.ckpt_dir, "episodes_per_ckpt": args.episodes_per_ckpt,
+                    "final_episodes": args.final_episodes,
+                },
+            )
+            print(f"[wandb] started run {run.id} ({run.url})", flush=True)
+        except Exception as e:
+            print(f"[wandb] init failed ({e!r}) -- continuing without wandb logging", flush=True)
+            run = None
     else:
         print("[wandb] wandb not installed -- sweep will run without logging", flush=True)
 
