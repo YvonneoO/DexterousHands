@@ -60,3 +60,17 @@ class PredTacClient:
             self.continuous = resp["continuous"]
             self.binary = resp["binary"]
         return self.continuous, self.binary
+
+    def staleness_ticks(self):
+        """How many client ticks old the most recent response is, right now
+        -- (last submitted tick) - (tick embedded in the freshest response
+        ever received). self._tick is the NEXT tick to submit, so the most
+        recently submitted one is self._tick - 1. -1 (a submit not yet made)
+        or a very large number (no response ever received, still all-zero)
+        both mean "no real staleness measurement yet", not "zero lag" --
+        callers should treat those as a distinct case, not average them in."""
+        if self._tick == 0:
+            return -1
+        if self.last_tick_seen < 0:
+            return None  # no response ever received -- still serving all-zero fallback
+        return (self._tick - 1) - self.last_tick_seen

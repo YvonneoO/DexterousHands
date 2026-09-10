@@ -1139,6 +1139,14 @@ class ShadowHandPen(BaseTask):
         self._predtac_client.submit(frames, sides_all_envs)
         continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
 
+        # Temporary staleness diagnostic (2026-09-10): how many client ticks
+        # old is the tactile reading actually feeding the policy right now,
+        # as measured (not inferred from server-vs-training tick-rate math).
+        _stale = self._predtac_client.staleness_ticks()
+        if self._predtac_client._tick % 25 == 0:
+            print(f"[predtac][staleness] client_tick={self._predtac_client._tick} "
+                  f"stale_ticks={_stale}", flush=True)
+
         num_links = continuous_np.shape[-1]
         continuous = _torch.from_numpy(continuous_np).to(self.device)
         binary = _torch.from_numpy(binary_np).to(self.device)
