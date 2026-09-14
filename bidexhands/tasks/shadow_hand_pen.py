@@ -1152,7 +1152,17 @@ class ShadowHandPen(BaseTask):
             self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
         frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
         self._predtac_client.submit(frames, sides_all_envs)
-        continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
+        # PREDTAC_BLOCKING=1 trades sim throughput for near-zero staleness --
+        # waits for the response matching the tick just submitted instead of
+        # taking whatever poll() finds freshest. Off by default (unchanged
+        # async behavior); set for an eval run to isolate staleness from
+        # prediction-quality as separate confounds, or for a training-time
+        # ablation testing whether stale tactile is actively harmful during
+        # learning (not just uninformative).
+        if os.environ.get("PREDTAC_BLOCKING", "0") == "1":
+            continuous_np, binary_np = self._predtac_client.poll_blocking()
+        else:
+            continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
 
         # Temporary staleness diagnostic (2026-09-10): how many client ticks
         # old is the tactile reading actually feeding the policy right now,

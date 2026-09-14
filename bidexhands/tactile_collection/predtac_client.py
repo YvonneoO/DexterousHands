@@ -15,6 +15,8 @@ caveat on the offline side. gt_pose_crop.py's `sides` dict uses string keys
 ("left"/"right") so this client is the one place that commits to a fixed
 slot order for the wire format.
 """
+import time
+
 import numpy as np
 
 from tactile_collection import predtac_ipc
@@ -74,3 +76,30 @@ class PredTacClient:
         if self.last_tick_seen < 0:
             return None  # no response ever received -- still serving all-zero fallback
         return (self._tick - 1) - self.last_tick_seen
+
+    def poll_blocking(self, timeout_s=15.0, poll_interval_s=0.02):
+        """Blocking variant of poll(): spins until a response for the most
+        recently submitted tick (self._tick - 1) has actually arrived --
+        i.e. staleness_ticks()==0 on return -- instead of taking whatever's
+        freshest so far like poll() does. This trades wall-clock time for
+        zero staleness, so it's only appropriate where the caller can
+        afford to stall the sim loop: eval (real-time throughput doesn't
+        matter there), or a deliberate training-time throttle experiment
+        (see PREDTAC_BLOCKING in the task classes) -- never the default
+        high-throughput training path, which stays async via poll().
+        Falls back to whatever's freshest and prints a warning if
+        timeout_s elapses first, rather than hanging forever on a dead or
+        permanently-behind server."""
+        if self._tick == 0:
+            return self.continuous, self.binary
+        target_tick = self._tick - 1
+        deadline = time.time() + timeout_s
+        while self.last_tick_seen < target_tick:
+            if time.time() > deadline:
+                print(f"[predtac][blocking] timeout after {timeout_s}s waiting for tick "
+                      f"{target_tick} (last_tick_seen={self.last_tick_seen}) -- "
+                      f"falling back to stale value", flush=True)
+                break
+            time.sleep(poll_interval_s)
+            self.poll()
+        return self.continuous, self.binary
