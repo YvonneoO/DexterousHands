@@ -33,6 +33,13 @@ class PredTacClient:
         self.continuous = np.zeros((num_envs, 2, num_links), dtype=np.float32)
         self.binary = np.zeros((num_envs, 2, num_links), dtype=np.float32)
         self._tick = 0
+        # Cached from the last submit() call, so poll_blocking() can
+        # re-send the SAME frame under a fresh tick number without the
+        # caller re-rendering -- see poll_blocking's docstring for why this
+        # is necessary (server-side frame_interval decimation).
+        self._last_frames = None
+        self._last_boxes = None
+        self._last_has_hand = None
         # Clear any request/response left over from a PREVIOUS process that
         # used this exact run_id -- see predtac_ipc.reset_run's docstring.
         # Without this, a stale leftover response can hand a brand-new
@@ -56,6 +63,9 @@ class PredTacClient:
                     has_hand[i, h] = True
         predtac_ipc.write_request(self.run_id, self._tick, frames_uint8, boxes, has_hand)
         self._tick += 1
+        self._last_frames = frames_uint8
+        self._last_boxes = boxes
+        self._last_has_hand = has_hand
 
     def poll(self):
         """Non-blocking. Updates self.continuous/self.binary in place if a
@@ -94,7 +104,7 @@ class PredTacClient:
             return None  # no response ever received -- still serving all-zero fallback
         return (self._tick - 1) - self.last_tick_seen
 
-    def poll_blocking(self, timeout_s=15.0, poll_interval_s=0.02):
+    def poll_blocking(self, timeout_s=15.0, poll_interval_s=0.02, resubmit_interval_s=1.0):
         """Blocking variant of poll(): spins until a genuinely NEW response
         (any tick newer than whatever was known when this was called) has
         arrived, instead of taking whatever's freshest so far like poll()
@@ -113,19 +123,51 @@ class PredTacClient:
         at all. Waiting for an exact match instead of "any newer" was tried
         first and burned the full timeout on every single call (see commit
         history) -- always falling back one tick short of the target instead
-        of ever really blocking. Falls back to whatever's freshest and prints
-        a warning if timeout_s elapses first, rather than hanging forever on
-        a dead or permanently-behind server."""
+        of ever really blocking.
+
+        ⚠️ RESUBMISSION (found live 2026-09-14): frame_interval decimation
+        means a SINGLE submitted tick has only a 1-in-frame_interval chance
+        of ever getting a response at all -- the server's main loop marks a
+        skipped tick "seen" and moves on WITHOUT ever writing a response for
+        it (see predtac_server.py's `continue` under the decimation check),
+        so passively waiting on one unlucky submission can deterministically
+        burn the full timeout_s -- confirmed live: at frame_interval=2,
+        every odd-numbered submitted tick got zero response, exactly
+        matching a 63s/iteration blocking-training slowdown that PERSISTED
+        even after forcing the server and training processes onto the same
+        physical node (ruling out any filesystem/network cause -- see
+        vision_ppo_train_predtac_colocated.sbatch). Fix: if no newer
+        response has appeared after resubmit_interval_s, re-send the SAME
+        frame (cached by submit()) under a fresh tick number -- physics
+        hasn't advanced while we've been waiting, so the frame content is
+        still correct, and this gives the server's decimation counter
+        another, differently-pared chance to keep it. Never disable this by
+        raising resubmit_interval_s above timeout_s "to save requests" --
+        frame_interval is a fixed model-training convention (NOT a
+        throughput knob, see predtac_server.py's --frame_interval help), so
+        without resubmission roughly 1-in-frame_interval calls are
+        guaranteed dead on arrival.
+
+        Falls back to whatever's freshest and prints a warning if timeout_s
+        elapses first, rather than hanging forever on a dead or
+        permanently-behind server."""
         if self._tick == 0:
             return self.continuous, self.binary
         seen_before = self.last_tick_seen
         deadline = time.time() + timeout_s
+        next_resubmit = time.time() + resubmit_interval_s
         while self.last_tick_seen <= seen_before:
-            if time.time() > deadline:
+            now = time.time()
+            if now > deadline:
                 print(f"[predtac][blocking] timeout after {timeout_s}s waiting for a response "
                       f"newer than tick {seen_before} (submitted tick={self._tick - 1}) -- "
                       f"falling back to stale value", flush=True)
                 break
+            if now > next_resubmit and self._last_frames is not None:
+                predtac_ipc.write_request(self.run_id, self._tick, self._last_frames,
+                                           self._last_boxes, self._last_has_hand)
+                self._tick += 1
+                next_resubmit = now + resubmit_interval_s
             time.sleep(poll_interval_s)
             self.poll()
         return self.continuous, self.binary
