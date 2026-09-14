@@ -111,3 +111,28 @@ def read_response(run_id):
             }
     except (OSError, ValueError, EOFError):
         return None
+
+
+def reset_run(run_id):
+    """Deletes any request/response (+ stray .tmp) files left over from a
+    PREVIOUS process that used this exact run_id. Found live 2026-09-14: a
+    reused run_id (a leftover response.npz from an earlier, since-cancelled
+    session still sitting on disk) silently poisoned a fresh client -- its
+    first poll() saw a response tagged with a HIGH tick number from the old
+    session, adopted it as last_tick_seen, and then permanently ignored every
+    genuinely fresh response from the new server (their LOW tick numbers
+    never satisfy "tick > last_tick_seen" against that stale high-water
+    mark) -- silently frozen on one stale frame indefinitely, not just a few
+    ticks behind. Call this once, before submitting the first request of a
+    new session, whenever there's any chance run_id was used before (which
+    is effectively always, given run_ids get reused across relaunches in
+    practice) -- both PredTacClient.__init__ (client side) and
+    predtac_server.py's own startup (server side) should call it, since
+    whichever process starts first "wins" the clean slate."""
+    d = run_dir(run_id)
+    for name in ("request.npz", "response.npz", "request.npz.tmp", "response.npz.tmp"):
+        path = os.path.join(d, name)
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass

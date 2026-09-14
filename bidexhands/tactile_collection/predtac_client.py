@@ -33,6 +33,12 @@ class PredTacClient:
         self.continuous = np.zeros((num_envs, 2, num_links), dtype=np.float32)
         self.binary = np.zeros((num_envs, 2, num_links), dtype=np.float32)
         self._tick = 0
+        # Clear any request/response left over from a PREVIOUS process that
+        # used this exact run_id -- see predtac_ipc.reset_run's docstring.
+        # Without this, a stale leftover response can hand a brand-new
+        # session a bogus high-water-mark tick and silently freeze it on one
+        # stale frame for the rest of the run (found live 2026-09-14).
+        predtac_ipc.reset_run(run_id)
 
     def submit(self, frames_uint8, sides_all_envs):
         """frames_uint8: (num_envs,H,W,3) uint8, one rendered frame per env
