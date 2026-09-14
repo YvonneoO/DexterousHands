@@ -78,26 +78,35 @@ class PredTacClient:
         return (self._tick - 1) - self.last_tick_seen
 
     def poll_blocking(self, timeout_s=15.0, poll_interval_s=0.02):
-        """Blocking variant of poll(): spins until a response for the most
-        recently submitted tick (self._tick - 1) has actually arrived --
-        i.e. staleness_ticks()==0 on return -- instead of taking whatever's
-        freshest so far like poll() does. This trades wall-clock time for
-        zero staleness, so it's only appropriate where the caller can
-        afford to stall the sim loop: eval (real-time throughput doesn't
-        matter there), or a deliberate training-time throttle experiment
-        (see PREDTAC_BLOCKING in the task classes) -- never the default
-        high-throughput training path, which stays async via poll().
-        Falls back to whatever's freshest and prints a warning if
-        timeout_s elapses first, rather than hanging forever on a dead or
-        permanently-behind server."""
+        """Blocking variant of poll(): spins until a genuinely NEW response
+        (any tick newer than whatever was known when this was called) has
+        arrived, instead of taking whatever's freshest so far like poll()
+        does. This trades wall-clock time for near-zero staleness, so it's
+        only appropriate where the caller can afford to stall the sim loop:
+        eval (real-time throughput doesn't matter there), or a deliberate
+        training-time throttle experiment (see PREDTAC_BLOCKING in the task
+        classes) -- never the default high-throughput training path, which
+        stays async via poll().
+
+        Deliberately waits for "any newer response", NOT "a response tagged
+        with exactly self._tick - 1": the server decimates to match training's
+        own frame_interval (only every 2nd raw client tick actually advances
+        its window and gets a fresh response -- see predtac_server.py), so a
+        response for the EXACT most-recently-submitted tick may never arrive
+        at all. Waiting for an exact match instead of "any newer" was tried
+        first and burned the full timeout on every single call (see commit
+        history) -- always falling back one tick short of the target instead
+        of ever really blocking. Falls back to whatever's freshest and prints
+        a warning if timeout_s elapses first, rather than hanging forever on
+        a dead or permanently-behind server."""
         if self._tick == 0:
             return self.continuous, self.binary
-        target_tick = self._tick - 1
+        seen_before = self.last_tick_seen
         deadline = time.time() + timeout_s
-        while self.last_tick_seen < target_tick:
+        while self.last_tick_seen <= seen_before:
             if time.time() > deadline:
-                print(f"[predtac][blocking] timeout after {timeout_s}s waiting for tick "
-                      f"{target_tick} (last_tick_seen={self.last_tick_seen}) -- "
+                print(f"[predtac][blocking] timeout after {timeout_s}s waiting for a response "
+                      f"newer than tick {seen_before} (submitted tick={self._tick - 1}) -- "
                       f"falling back to stale value", flush=True)
                 break
             time.sleep(poll_interval_s)
