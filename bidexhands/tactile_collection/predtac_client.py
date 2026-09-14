@@ -59,8 +59,19 @@ class PredTacClient:
         resp = predtac_ipc.read_response(self.run_id)
         if resp is not None and resp["tick"] > self.last_tick_seen:
             self.last_tick_seen = resp["tick"]
-            self.continuous = resp["continuous"]
-            self.binary = resp["binary"]
+            # Defensive: a degenerate frame (e.g. no hand detected, a
+            # transient WiLoR/DINO failure) can in principle leak NaN out of
+            # the server's pooling -- found live 2026-09-14 on VTDexManip's
+            # Handover (job 539404, iteration 267/4400): a MultivariateNormal
+            # ValueError traced back to NaN in the policy's action
+            # distribution, consistent with an unsanitized NaN tactile
+            # reading silently propagating through the obs buffer into the
+            # actor. Zero is the same safe fallback poll() already uses
+            # before any response has ever arrived, so replacing NaN with 0
+            # here is consistent with that existing convention, not a new
+            # semantics.
+            self.continuous = np.nan_to_num(resp["continuous"], nan=0.0)
+            self.binary = np.nan_to_num(resp["binary"], nan=0.0)
         return self.continuous, self.binary
 
     def staleness_ticks(self):
