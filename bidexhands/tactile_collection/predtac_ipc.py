@@ -113,6 +113,33 @@ def read_response(run_id):
         return None
 
 
+def ready_marker_path(run_id):
+    return os.path.join(run_dir(run_id), "server_ready.marker")
+
+
+def mark_server_ready(run_id):
+    """Written by predtac_server.py once every model replica is loaded and
+    it's about to enter its serving loop -- lets a training/eval launcher
+    wait for GENUINE readiness before starting the sim, instead of racing
+    ahead while the server is still loading. Model loading (WiLoR + DINOv2
+    + the v2-dit checkpoint) takes real wall-clock time (tens of seconds);
+    the default async client (see this module's own docstring) never
+    "catches up" a backlog it accumulates during that window -- it always
+    serves whatever's freshest, so ticks submitted before the server was
+    ready become a PERMANENT staleness offset for the rest of the run, not
+    a transient one. Found live 2026-09-14 on Handover's async training:
+    staleness climbed past 600 ticks and kept growing, while the server's
+    own per-tick processing time (~387ms at num_envs=8) was in fact healthy
+    -- the gap was baked in at startup, not accumulating from an ongoing
+    slowdown."""
+    with open(ready_marker_path(run_id), "w") as f:
+        f.write("ready")
+
+
+def is_server_ready(run_id):
+    return os.path.exists(ready_marker_path(run_id))
+
+
 def reset_run(run_id):
     """Deletes any request/response (+ stray .tmp) files left over from a
     PREVIOUS process that used this exact run_id. Found live 2026-09-14: a
@@ -123,12 +150,20 @@ def reset_run(run_id):
     genuinely fresh response from the new server (their LOW tick numbers
     never satisfy "tick > last_tick_seen" against that stale high-water
     mark) -- silently frozen on one stale frame indefinitely, not just a few
-    ticks behind. Call this once, before submitting the first request of a
-    new session, whenever there's any chance run_id was used before (which
-    is effectively always, given run_ids get reused across relaunches in
-    practice) -- both PredTacClient.__init__ (client side) and
-    predtac_server.py's own startup (server side) should call it, since
-    whichever process starts first "wins" the clean slate."""
+    ticks behind. Called by PredTacClient.__init__ on every fresh client
+    session (training AND eval), whenever there's any chance run_id was
+    used before (which is effectively always, given run_ids get reused
+    across relaunches in practice).
+
+    Deliberately does NOT touch the ready marker (see mark_server_ready) --
+    that belongs to the SERVER's lifecycle, not the client's. A training
+    launcher may legitimately be relaunched (resume after a crash/timeout)
+    against a server that's already been running and ready for a while;
+    if the client's own startup wiped that marker, a second launcher
+    instance's wait-for-ready loop would hang forever waiting for a marker
+    the still-running server has no reason to write again. Only
+    server_reset_run (called by predtac_server.py at ITS OWN startup,
+    before it becomes ready again) clears the marker."""
     d = run_dir(run_id)
     for name in ("request.npz", "response.npz", "request.npz.tmp", "response.npz.tmp"):
         path = os.path.join(d, name)
@@ -136,3 +171,18 @@ def reset_run(run_id):
             os.remove(path)
         except FileNotFoundError:
             pass
+
+
+def server_reset_run(run_id):
+    """Like reset_run, but also clears the ready marker -- call ONLY from
+    predtac_server.py's own startup, before it loads its models and writes
+    a fresh marker via mark_server_ready. A stale marker left over from a
+    previous server instance under this run_id would let a training
+    launcher's wait-for-ready loop pass immediately against a server that
+    isn't actually running this session, defeating the whole point of the
+    marker."""
+    reset_run(run_id)
+    try:
+        os.remove(ready_marker_path(run_id))
+    except FileNotFoundError:
+        pass
