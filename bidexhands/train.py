@@ -56,10 +56,21 @@ def train():
     if args.max_iterations > 0:
         iterations = args.max_iterations
 
-    if algo == "sarl" and args.algo == "ppo" and args.model_dir != "":
+    if algo == "sarl" and args.algo == "ppo" and args.model_dir != "" and args.test:
         # Held-out eval of a loaded checkpoint (deterministic, bounded episode count) --
         # mirrors the MARL runner.eval(1000) branch above; PPO's own run() test-mode loop
         # is an unbounded visualization loop with no success accounting, see runner.eval.
+        #
+        # ⚠️ Requires --test explicitly, not just --model_dir alone (found live
+        # 2026-09-14): --model_dir is ALSO how a normal resume-and-keep-training
+        # invocation loads a checkpoint (see process_sarl / model.load(),
+        # restores weights + current_learning_iteration). Without the --test
+        # guard, every resumed job in a --dependency chain silently ran ONLY
+        # this 100-episode eval and exited (~50min, exit 0) instead of
+        # continuing training -- 7 of 8 chained jobs across the Pen and
+        # Scissors PREDTAC_BLOCKING ablation runs did zero additional training
+        # this way, discovered only because their logs never printed a single
+        # "Learning iteration" line.
         runner.eval(num_episodes=100)
     elif args.algo in META_ALGOS:
         runner.train(train_epoch=iterations)
