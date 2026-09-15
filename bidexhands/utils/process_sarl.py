@@ -11,7 +11,24 @@ def process_sarl(args, env, cfg_train, logdir):
     # is_testing = True
     # Override resume and testing flags if they are passed as parameters.
     if args.model_dir != "":
-        is_testing = True
+        # ⚠️ Must mirror args.test, NOT be forced True (found live 2026-09-15):
+        # is_testing=True is passed straight into PPO(..., is_testing=...), and
+        # PPO.run() branches on self.is_testing into an UNBOUNDED "while True"
+        # inference loop with no training, no logging, no checkpoint saves --
+        # see ppo.py's run(). Forcing is_testing=True just because --model_dir
+        # was set (the normal way to RESUME training, not just to eval) meant
+        # every resumed/auto-resumed job across the whole Pen/Scissors
+        # PREDTAC_BLOCKING chain silently ran an infinite inference loop
+        # instead of training for its entire walltime (confirmed: tfevents
+        # stuck at the 88-byte header, zero "Learning iteration" log lines,
+        # zero checkpoints beyond model_0.pt, across 11 separate job attempts
+        # spanning Sep 14-15). This is a second, independent instance of the
+        # same "any --model_dir forces eval-only" bug already fixed once in
+        # train.py's own branch (commit f797bb4) -- that fix alone did NOT
+        # cover this file, since process_sarl() builds the PPO object (with
+        # is_testing baked in at construction time) before train.py's branch
+        # ever runs.
+        is_testing = args.test
         chkpt_path = args.model_dir
 
     if args.max_iterations != -1:
