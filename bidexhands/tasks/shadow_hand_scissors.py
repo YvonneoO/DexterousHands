@@ -110,6 +110,12 @@ class ShadowHandScissors(BaseTask):
         # (0/1 contact) is NOT scaled -- already comparable magnitude to
         # everything else.
         self.predtac_continuous_obs_scale = 20.0
+        # predtacContactOnly: contact-or-not ablation of the P+Pred-Tac arm -- the
+        # continuous (max-pooled predicted pressure) channel is zeroed, leaving only
+        # the server's taxel-threshold OR-pooled binary contact (the decision T.Acc
+        # scores). obs layout/dim is unchanged (zeros contribute nothing to a
+        # from-scratch MLP), so only the cfg flag differs from the continuous arm.
+        self.predtac_contact_only = bool(self.cfg["env"].get("predtacContactOnly", False))
 
         self.reset_position_noise = self.cfg["env"]["resetPositionNoise"]
         self.reset_rotation_noise = self.cfg["env"]["resetRotationNoise"]
@@ -1117,6 +1123,8 @@ class ShadowHandScissors(BaseTask):
 
         num_links = continuous_np.shape[-1]
         continuous = self.predtac_continuous_obs_scale * _torch.from_numpy(continuous_np).to(self.device)
+        if self.predtac_contact_only:
+            continuous = _torch.zeros_like(continuous)
         binary = _torch.from_numpy(binary_np).to(self.device)  # already 0/1 -- no scale needed
         right_tactile = _torch.cat([continuous[:, 1, :], binary[:, 1, :]], dim=-1)
         left_tactile = _torch.cat([continuous[:, 0, :], binary[:, 0, :]], dim=-1)
