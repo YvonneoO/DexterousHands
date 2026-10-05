@@ -1,7 +1,6 @@
-# CONTACT-WEIGHTED variant of ShadowHandPenProprioPredTac.yaml: GT-dim 12-link layout (386-dim) with
-# binary contact x3.0 (was 1.0) and continuous pressure x2.0 (was 20.0, i.e. 10% of its original
-# weight). Emphasises the T.Acc-style contact decision, keeps a small dense-pressure signal.
-# Scale values are first guesses, not tuned (clip_observations=5.0, so binary x3 stays unclipped).
+# GT-DIM variant of ShadowHandPenProprioPredTac.yaml: continuous channel = the same 12 links/hand
+# (same order) as the GT-tac arm, + binary contact for those 12 links (386-dim obs). Scales
+# unchanged (continuous x20, binary x1).
 # Tactile-SR ablation "P+Pred-tactile" arm for ShadowHandPen: identical to
 # ShadowHandPen.yaml (same task, same object/reward/randomization) except
 # observationType, which switches shadow_hand_pen.py's
@@ -64,8 +63,6 @@ env:
   objectType: "pot" # can be block, egg or pen
   observationType: "proprio_predtac" # full_state, point_cloud, proprio_only, proprio_gttac, or proprio_predtac (tactile-SR "P+Pred-tactile" arm)
   predtacGtDim: True
-  predtacContinuousScale: 2.0
-  predtacBinaryScale: 3.0
   handAgentIndex: "[[0, 1, 2, 3, 4, 5]]"
   asymmetric_observations: False
   successTolerance: 0.1

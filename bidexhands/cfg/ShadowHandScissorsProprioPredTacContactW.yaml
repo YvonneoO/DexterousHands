@@ -1,8 +1,7 @@
-# CONTACT-WEIGHTED variant of ShadowHandScissorsProprioPredTac.yaml: identical except the two
-# predtac input scales -- binary per-link contact x3.0 (was 1.0), continuous predicted
-# pressure x2.0 (was 20.0, i.e. 10% of its original weight). Emphasises the T.Acc-style
-# contact decision while keeping a small dense-pressure signal. Scale values are first
-# guesses, not tuned (clip_observations=5.0, so binary x3 stays inside the clamp).
+# CONTACT-WEIGHTED variant of ShadowHandScissorsProprioPredTac.yaml: GT-dim 12-link layout (386-dim) with
+# binary contact x3.0 (was 1.0) and continuous pressure x2.0 (was 20.0, i.e. 10% of its original
+# weight). Emphasises the T.Acc-style contact decision, keeps a small dense-pressure signal.
+# Scale values are first guesses, not tuned (clip_observations=5.0, so binary x3 stays unclipped).
 # Tactile-SR ablation "P+Pred-tactile" arm for ShadowHandScissors: identical
 # to ShadowHandScissors.yaml except observationType, which switches
 # shadow_hand_scissors.py's compute_proprio_predtac_state (406-dim: identical
@@ -52,6 +51,7 @@ env:
 
   objectType: "pot" # can be block, egg or pen
   observationType: "proprio_predtac" # full_state, point_cloud, proprio_only, proprio_gttac, or proprio_predtac (tactile-SR "P+Pred-tactile" arm)
+  predtacGtDim: True
   predtacContinuousScale: 2.0
   predtacBinaryScale: 3.0
   handAgentIndex: "[[0, 1, 2, 3, 4, 5]]"

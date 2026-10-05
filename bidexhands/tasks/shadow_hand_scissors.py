@@ -233,6 +233,20 @@ class ShadowHandScissors(BaseTask):
         ]
         self.num_tactile_extra = len(self.tactile_extra_links)  # 12
 
+        # predtacGtDim: make the P+Pred-Tac continuous channel the SAME 12 links/hand (same
+        # order) as the GT-tac arm's tactile_extra_links, plus a binary contact flag for
+        # those same 12 links as extra input -> 338 + 2 hands x (12 + 12) = 386 dims.
+        # The server pools the prediction to the 17 anatomical groups in sorted-name
+        # order (inference_tactile_sim._build_link_pool_masks); GT's 12 = those 17 minus the
+        # 5 distal (fingertip) groups, so selection is by name, not by position.
+        self.predtac_gtdim = bool(self.cfg["env"].get("predtacGtDim", False))
+        if self.predtac_gtdim:
+            _pred_names = sorted([f + seg for f in ("ff", "mf", "rf", "lf") for seg in ("distal", "middle", "proximal")]
+                                 + ["thdistal", "thmiddle", "thproximal", "palm", "lfmetacarpal"])
+            assert len(_pred_names) == 17
+            self.predtac_gt_link_idx = [_pred_names.index(n.split(":")[1]) for n in self.tactile_extra_links]
+            self.num_obs_dict["proprio_predtac"] = 338 + 2 * 2 * len(self.predtac_gt_link_idx)
+
         self.use_vel_obs = False
         self.fingertip_obs = True
         self.asymmetric_obs = self.cfg["env"]["asymmetric_observations"]
@@ -1125,11 +1139,15 @@ class ShadowHandScissors(BaseTask):
             print(f"[predtac][staleness] client_tick={self._predtac_client._tick} "
                   f"stale_ticks={_stale}", flush=True)
 
-        num_links = continuous_np.shape[-1]
         continuous = self.predtac_continuous_obs_scale * _torch.from_numpy(continuous_np).to(self.device)
         if self.predtac_contact_only:
             continuous = _torch.zeros_like(continuous)
         binary = self.predtac_binary_obs_scale * _torch.from_numpy(binary_np).to(self.device)  # 0/1, scale 1.0 by default
+        if self.predtac_gtdim:
+            _sel = _torch.as_tensor(self.predtac_gt_link_idx, device=self.device, dtype=_torch.long)
+            continuous = continuous[:, :, _sel]
+            binary = binary[:, :, _sel]
+        num_links = continuous.shape[-1]
         right_tactile = _torch.cat([continuous[:, 1, :], binary[:, 1, :]], dim=-1)
         left_tactile = _torch.cat([continuous[:, 0, :], binary[:, 0, :]], dim=-1)
 

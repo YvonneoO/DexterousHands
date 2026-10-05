@@ -1,36 +1,23 @@
-# CONTACT-WEIGHTED variant of ShadowHandPenProprioPredTac.yaml: GT-dim 12-link layout (386-dim) with
-# binary contact x3.0 (was 1.0) and continuous pressure x2.0 (was 20.0, i.e. 10% of its original
-# weight). Emphasises the T.Acc-style contact decision, keeps a small dense-pressure signal.
-# Scale values are first guesses, not tuned (clip_observations=5.0, so binary x3 stays unclipped).
-# Tactile-SR ablation "P+Pred-tactile" arm for ShadowHandPen: identical to
-# ShadowHandPen.yaml (same task, same object/reward/randomization) except
-# observationType, which switches shadow_hand_pen.py's
-# compute_proprio_predtac_state (406-dim: proprio_only's 338 + a
-# 17-anatomical-link/hand tactile channel -- 17 max-pooled continuous +
-# 17 taxel-level-threshold binary contact values per hand -- SOURCED FROM
-# the online tactile-prediction model via tactile_collection/predtac_client.py
-# + predtac_ipc.py, NOT ground-truth sim contact like ProprioGTTac's
-# compute_proprio_gttac_state, which this config is otherwise a sibling of).
+# GT-DIM variant of ShadowHandScissorsProprioPredTac.yaml: continuous channel = the same 12 links/hand
+# (same order) as the GT-tac arm, + binary contact for those 12 links (386-dim obs). Scales
+# unchanged (continuous x20, binary x1).
+# Tactile-SR ablation "P+Pred-tactile" arm for ShadowHandScissors: identical
+# to ShadowHandScissors.yaml except observationType, which switches
+# shadow_hand_scissors.py's compute_proprio_predtac_state (406-dim: identical
+# structure to ShadowHandPenProprioPredTac.yaml -- see that file's own
+# comments for the full rationale, byte-for-byte the same layout here).
 #
-# numEnvs is DELIBERATELY far below ProprioGTTac's 128: this arm renders one
-# camera frame per env AND round-trips it through a separate tactile-
-# prediction server process every tick (see predtac_server.py in the
-# Ego2Contact repo) -- both real, not-yet-fully-characterized added costs
-# that ProprioGTTac's privileged-sensor-only tactile channel never pays.
-# Reduce further (or increase, if the server keeps up) based on the actual
-# per-tick wall-clock once training is running -- see
-# benchmark_online_tactile_pred.py's throughput findings for why batching
-# beyond what's already captured at small N doesn't buy much here.
-#
-# Requires the environment variable PREDTAC_RUN_ID to be set before training
-# starts (shared with predtac_server.py's own --run_id) -- see
-# vision_ppo_train_predtac.sbatch.
+# numEnvs matches the Pen arm's own reduced count (renders + IPC round-trips
+# a camera frame per env per tick -- see ShadowHandPenProprioPredTac.yaml).
+# Requires PREDTAC_RUN_ID set before training starts (shared with
+# predtac_server.py's own --run_id) -- see vision_ppo_train_predtac.sbatch
+# (TASK_NAME=ShadowHandScissors).
 # if given, will override the device setting in gym.
 env:
-  env_name: "shadow_hand_pen"
+  env_name: "shadow_hand_scissors"
   numEnvs: 8
   envSpacing: 1.5
-  episodeLength: 125
+  episodeLength: 150
   enableDebugVis: False
   cameraDebug: True
   pointCloudDebug: True
@@ -64,8 +51,6 @@ env:
   objectType: "pot" # can be block, egg or pen
   observationType: "proprio_predtac" # full_state, point_cloud, proprio_only, proprio_gttac, or proprio_predtac (tactile-SR "P+Pred-tactile" arm)
   predtacGtDim: True
-  predtacContinuousScale: 2.0
-  predtacBinaryScale: 3.0
   handAgentIndex: "[[0, 1, 2, 3, 4, 5]]"
   asymmetric_observations: False
   successTolerance: 0.1
@@ -188,7 +173,7 @@ sim:
   physx:
     num_threads: 4
     solver_type: 1  # 0: pgs, 1: tgs
-    num_position_iterations: 4
+    num_position_iterations: 8
     num_velocity_iterations: 0
     contact_offset: 0.002
     rest_offset: 0.0
