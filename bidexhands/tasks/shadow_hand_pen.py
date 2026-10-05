@@ -110,7 +110,11 @@ class ShadowHandPen(BaseTask):
         # the tail, not the bulk" pattern GT-Tac already established. binary
         # (0/1 contact) is NOT scaled -- already comparable magnitude to
         # everything else.
-        self.predtac_continuous_obs_scale = 20.0
+        # predtacContinuousScale / predtacBinaryScale: per-channel input weighting for the
+        # P+Pred-Tac arm (defaults 20.0 / 1.0 = the original arm, unchanged). The contact-
+        # weighted variant raises binary contact and shrinks the continuous channel.
+        self.predtac_continuous_obs_scale = float(self.cfg["env"].get("predtacContinuousScale", 20.0))
+        self.predtac_binary_obs_scale = float(self.cfg["env"].get("predtacBinaryScale", 1.0))
         # predtacContactOnly: contact-or-not ablation of the P+Pred-Tac arm -- the
         # continuous (max-pooled predicted pressure) channel is zeroed, leaving only
         # the server's taxel-threshold OR-pooled binary contact (the decision T.Acc
@@ -1182,7 +1186,7 @@ class ShadowHandPen(BaseTask):
         continuous = self.predtac_continuous_obs_scale * _torch.from_numpy(continuous_np).to(self.device)
         if self.predtac_contact_only:
             continuous = _torch.zeros_like(continuous)
-        binary = _torch.from_numpy(binary_np).to(self.device)  # already 0/1 -- no scale needed
+        binary = self.predtac_binary_obs_scale * _torch.from_numpy(binary_np).to(self.device)  # 0/1, scale 1.0 by default
         right_tactile = _torch.cat([continuous[:, 1, :], binary[:, 1, :]], dim=-1)  # (num_envs, 2*num_links)
         left_tactile = _torch.cat([continuous[:, 0, :], binary[:, 0, :]], dim=-1)
 
