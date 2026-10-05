@@ -47,6 +47,7 @@ env:
 
   objectType: "pot" # can be block, egg or pen
   observationType: "proprio_predtac" # full_state, point_cloud, proprio_only, proprio_gttac, or proprio_predtac (tactile-SR "P+Pred-tactile" arm)
+  saveInterval: 100  # checkpoint every 100 iters (default 500) -- short chained jobs lose <=100 iters on timeout
   handAgentIndex: "[[0, 1, 2, 3, 4, 5]]"
   asymmetric_observations: False
   successTolerance: 0.1
