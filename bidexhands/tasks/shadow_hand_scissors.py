@@ -239,12 +239,23 @@ class ShadowHandScissors(BaseTask):
         # The server pools the prediction to the 17 anatomical groups in sorted-name
         # order (inference_tactile_sim._build_link_pool_masks); GT's 12 = those 17 minus the
         # 5 distal (fingertip) groups, so selection is by name, not by position.
+        # tactileFingertips: ALSO include the 5 fingertip (distal) force sensors -- they exist
+        # in vec_sensor_tensor ([0:30] right, [102:132] left) but proprio_only strips them and
+        # the original GT-tac arm never added them back. Applies to BOTH proprio_gttac
+        # (338 + 2x17 = 372) and the predtacGtDim layout (338 + 2x2x17 = 406). Tactile block
+        # order = fingertips (ff,mf,rf,lf,th distal) first, then the 12 extra links.
+        self.tactile_fingertips = bool(self.cfg["env"].get("tactileFingertips", False))
+        if self.tactile_fingertips:
+            self.num_obs_dict["proprio_gttac"] = 338 + 2 * (len(self.fingertips) + self.num_tactile_extra)
         self.predtac_gtdim = bool(self.cfg["env"].get("predtacGtDim", False))
         if self.predtac_gtdim:
             _pred_names = sorted([f + seg for f in ("ff", "mf", "rf", "lf") for seg in ("distal", "middle", "proximal")]
                                  + ["thdistal", "thmiddle", "thproximal", "palm", "lfmetacarpal"])
             assert len(_pred_names) == 17
-            self.predtac_gt_link_idx = [_pred_names.index(n.split(":")[1]) for n in self.tactile_extra_links]
+            _gt_names = [n.split(":")[1] for n in self.tactile_extra_links]
+            if self.tactile_fingertips:
+                _gt_names = [n.split(":")[1] for n in self.fingertips] + _gt_names
+            self.predtac_gt_link_idx = [_pred_names.index(n) for n in _gt_names]
             self.num_obs_dict["proprio_predtac"] = 338 + 2 * 2 * len(self.predtac_gt_link_idx)
 
         self.use_vel_obs = False
@@ -988,6 +999,25 @@ class ShadowHandScissors(BaseTask):
         self.obs_buf[:, action_another_obs_start:action_another_obs_start + 26] = self.actions[:, 26:]
         # (object/scissors tail intentionally omitted entirely -- not proprioception)
 
+    def _gttac_tactile(self, hand):
+        """GT per-link tactile block for one hand (0=right, 1=left): force magnitude x
+        tactile_extra_obs_scale. Sensor layout per hand: [5 fingertip][12 extra] x 6D
+        (right starts at 0, left at 102). With tactileFingertips the fingertip magnitudes
+        are prepended (-> 17 values); otherwise only the 12 extra links (original arm)."""
+        off = 0 if hand == 0 else 102
+        extra = self.vec_sensor_tensor[:, off + 30:off + 102].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
+        mags = torch.norm(extra, dim=-1)
+        if self.tactile_fingertips:
+            tips = self.vec_sensor_tensor[:, off:off + 30].view(self.num_envs, len(self.fingertips), 6)[:, :, :3]
+            tip_mags = torch.norm(tips, dim=-1)
+            if not getattr(self, "_gttac_tip_diag_done", False):
+                print(f"[gttac][diag] hand={hand} raw fingertip |F|: max={tip_mags.max().item():.3f} "
+                      f"mean={tip_mags.mean().item():.3f} | raw extra-link |F|: max={mags.max().item():.3f} "
+                      f"mean={mags.mean().item():.3f}", flush=True)
+                self._gttac_tip_diag_done = hand == 1
+            mags = torch.cat([tip_mags, mags], dim=-1)
+        return self.tactile_extra_obs_scale * mags
+
     def compute_proprio_gttac_state(self):
         """
         Tactile-SR ablation "P+GT-tactile" arm: same as compute_proprio_only_state,
@@ -1035,11 +1065,11 @@ class ShadowHandScissors(BaseTask):
         self.obs_buf[:, fingertip_obs_start:fingertip_obs_start + num_ft_states] = self.fingertip_state.reshape(self.num_envs, num_ft_states)
 
         tactile_obs_start = fingertip_obs_start + num_ft_states
-        right_extra_forces = self.vec_sensor_tensor[:, 30:102].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
-        self.obs_buf[:, tactile_obs_start:tactile_obs_start + self.num_tactile_extra] = \
-            self.tactile_extra_obs_scale * torch.norm(right_extra_forces, dim=-1)
+        right_tac = self._gttac_tactile(0)
+        n_tac = right_tac.shape[-1]
+        self.obs_buf[:, tactile_obs_start:tactile_obs_start + n_tac] = right_tac
 
-        hand_pose_start = tactile_obs_start + self.num_tactile_extra
+        hand_pose_start = tactile_obs_start + n_tac
         self.obs_buf[:, hand_pose_start:hand_pose_start + 3] = self.right_hand_pos
         self.obs_buf[:, hand_pose_start+3:hand_pose_start+4] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[0].unsqueeze(-1)
         self.obs_buf[:, hand_pose_start+4:hand_pose_start+5] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[1].unsqueeze(-1)
@@ -1059,11 +1089,10 @@ class ShadowHandScissors(BaseTask):
         self.obs_buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
 
         tactile_another_obs_start = fingertip_another_obs_start + num_ft_states
-        left_extra_forces = self.vec_sensor_tensor[:, 132:204].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
-        self.obs_buf[:, tactile_another_obs_start:tactile_another_obs_start + self.num_tactile_extra] = \
-            self.tactile_extra_obs_scale * torch.norm(left_extra_forces, dim=-1)
+        left_tac = self._gttac_tactile(1)
+        self.obs_buf[:, tactile_another_obs_start:tactile_another_obs_start + n_tac] = left_tac
 
-        hand_another_pose_start = tactile_another_obs_start + self.num_tactile_extra
+        hand_another_pose_start = tactile_another_obs_start + n_tac
         self.obs_buf[:, hand_another_pose_start:hand_another_pose_start + 3] = self.left_hand_pos
         self.obs_buf[:, hand_another_pose_start+3:hand_another_pose_start+4] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[0].unsqueeze(-1)
         self.obs_buf[:, hand_another_pose_start+4:hand_another_pose_start+5] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[1].unsqueeze(-1)
