@@ -114,6 +114,9 @@ class ShadowHandScissors(BaseTask):
         # weighted variant raises binary contact and shrinks the continuous channel.
         self.predtac_continuous_obs_scale = float(self.cfg["env"].get("predtacContinuousScale", 20.0))
         self.predtac_binary_obs_scale = float(self.cfg["env"].get("predtacBinaryScale", 1.0))
+        # noisyTactile: replace the camera+predictor round-trip with a NOISY-GT model of the predictor's
+        # output (tactile_collection/noisy_tactile.py) -- lets this arm train at thousands of envs.
+        self.noisy_tactile = bool(self.cfg["env"].get("noisyTactile", False))
         # predtacContactOnly: contact-or-not ablation of the P+Pred-Tac arm -- the
         # continuous (max-pooled predicted pressure) channel is zeroed, leaving only
         # the server's taxel-threshold OR-pooled binary contact (the decision T.Acc
@@ -1120,6 +1123,29 @@ class ShadowHandScissors(BaseTask):
         _buf[:, action_another_obs_start:action_another_obs_start + 26] = self.actions[:, 26:]
         # (object/goal tail intentionally omitted entirely -- not proprioception, matches proprio_only)
 
+    def _noisy_tactile_obs(self):
+        """Noisy-GT stand-in for the predictor: (continuous, binary), each (N, 2, 17), slot 0 = left,
+        1 = right, links in the server's sorted-name order (same convention as predtac_client)."""
+        import torch as _torch
+
+        if not hasattr(self, "_noisy_tactile_model"):
+            from tactile_collection.noisy_tactile import NoisyTactileModel
+            self._noisy_tactile_model = NoisyTactileModel(
+                self.num_envs, self.device, self.cfg["env"].get("noisyTactileParams"))
+            pred_names = sorted([f + seg for f in ("ff", "mf", "rf", "lf") for seg in ("distal", "middle", "proximal")]
+                                + ["thdistal", "thmiddle", "thproximal", "palm", "lfmetacarpal"])
+            gt_names = [n.split(":")[1] for n in self.fingertips] + [n.split(":")[1] for n in self.tactile_extra_links]
+            self._noisy_perm = _torch.as_tensor([gt_names.index(n) for n in pred_names],
+                                                device=self.device, dtype=_torch.long)
+
+        def hand_forces(off):
+            tips = self.vec_sensor_tensor[:, off:off + 30].view(self.num_envs, len(self.fingertips), 6)[:, :, :3]
+            extra = self.vec_sensor_tensor[:, off + 30:off + 102].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
+            return _torch.cat([_torch.norm(tips, dim=-1), _torch.norm(extra, dim=-1)], dim=-1)[:, self._noisy_perm]
+
+        force = _torch.stack([hand_forces(102), hand_forces(0)], dim=1)  # left, right
+        return self._noisy_tactile_model(force)
+
     def _predtac_lazy_init(self):
         """First-call setup for the "proprio_predtac" arm -- identical to
         shadow_hand_pen.py's own _predtac_lazy_init, see there for the full
@@ -1164,32 +1190,37 @@ class ShadowHandScissors(BaseTask):
         from tactile_collection.gt_pose_crop import build_bimanual_boxes_all_envs
         from tactile_collection.multi_env_camera import render_all_and_capture
 
-        if not hasattr(self, "_predtac_client"):
-            self._predtac_lazy_init()
-
-        sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
-            self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
-        frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
-        self._predtac_client.submit(frames, sides_all_envs)
-        # PREDTAC_BLOCKING=1 trades sim throughput for near-zero staleness --
-        # see shadow_hand_pen.py's identical block for the full rationale.
-        if os.environ.get("PREDTAC_BLOCKING", "0") == "1":
-            continuous_np, binary_np = self._predtac_client.poll_blocking()
+        if self.noisy_tactile:
+            continuous_raw, binary_raw = self._noisy_tactile_obs()
         else:
-            continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
+            if not hasattr(self, "_predtac_client"):
+                self._predtac_lazy_init()
 
-        # Temporary staleness diagnostic (2026-09-10): how many client ticks
-        # old is the tactile reading actually feeding the policy right now,
-        # as measured (not inferred from server-vs-training tick-rate math).
-        _stale = self._predtac_client.staleness_ticks()
-        if self._predtac_client._tick % 25 == 0:
-            print(f"[predtac][staleness] client_tick={self._predtac_client._tick} "
-                  f"stale_ticks={_stale}", flush=True)
+            sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
+                self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
+            frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
+            self._predtac_client.submit(frames, sides_all_envs)
+            # PREDTAC_BLOCKING=1 trades sim throughput for near-zero staleness --
+            # see shadow_hand_pen.py's identical block for the full rationale.
+            if os.environ.get("PREDTAC_BLOCKING", "0") == "1":
+                continuous_np, binary_np = self._predtac_client.poll_blocking()
+            else:
+                continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
 
-        continuous = self.predtac_continuous_obs_scale * _torch.from_numpy(continuous_np).to(self.device)
+            # Temporary staleness diagnostic (2026-09-10): how many client ticks
+            # old is the tactile reading actually feeding the policy right now,
+            # as measured (not inferred from server-vs-training tick-rate math).
+            _stale = self._predtac_client.staleness_ticks()
+            if self._predtac_client._tick % 25 == 0:
+                print(f"[predtac][staleness] client_tick={self._predtac_client._tick} "
+                      f"stale_ticks={_stale}", flush=True)
+
+            continuous_raw = _torch.from_numpy(continuous_np).to(self.device)
+            binary_raw = _torch.from_numpy(binary_np).to(self.device)  # already 0/1
+        continuous = self.predtac_continuous_obs_scale * continuous_raw
         if self.predtac_contact_only:
             continuous = _torch.zeros_like(continuous)
-        binary = self.predtac_binary_obs_scale * _torch.from_numpy(binary_np).to(self.device)  # 0/1, scale 1.0 by default
+        binary = self.predtac_binary_obs_scale * binary_raw  # 0/1, scale 1.0 by default
         if self.predtac_gtdim:
             _sel = _torch.as_tensor(self.predtac_gt_link_idx, device=self.device, dtype=_torch.long)
             continuous = continuous[:, :, _sel]
