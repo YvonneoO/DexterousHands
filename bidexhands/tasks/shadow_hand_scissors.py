@@ -245,6 +245,9 @@ class ShadowHandScissors(BaseTask):
         # (338 + 2x17 = 372) and the predtacGtDim layout (338 + 2x2x17 = 406). Tactile block
         # order = fingertips (ff,mf,rf,lf,th distal) first, then the 12 extra links.
         self.tactile_fingertips = bool(self.cfg["env"].get("tactileFingertips", False))
+        # teacherObs: also compute the original GT-tac arm's 362-dim observation every step into
+        # self.teacher_obs (DAgger teacher input), independent of this env's own obs_type.
+        self.teacher_obs_enabled = bool(self.cfg["env"].get("teacherObs", False))
         if self.tactile_fingertips:
             self.num_obs_dict["proprio_gttac"] = 338 + 2 * (len(self.fingertips) + self.num_tactile_extra)
         self.predtac_gtdim = bool(self.cfg["env"].get("predtacGtDim", False))
@@ -930,8 +933,22 @@ class ShadowHandScissors(BaseTask):
         elif self.obs_type == "proprio_predtac":
             self.compute_proprio_predtac_state()
 
+        if self.teacher_obs_enabled:
+            self._compute_teacher_obs()
+
         if self.asymmetric_obs:
             self.compute_full_state(True)
+
+    def _compute_teacher_obs(self):
+        """GT-tac teacher observation (338 + 2x12 = 362 dims, no fingertips, the layout the
+        seed-42 GT-tac checkpoints were trained on) into self.teacher_obs, without touching obs_buf."""
+        if not hasattr(self, "teacher_obs"):
+            self.teacher_obs = torch.zeros(self.num_envs, 338 + 2 * self.num_tactile_extra, device=self.device)
+        self._teacher_mode = True
+        try:
+            self.compute_proprio_gttac_state(buf=self.teacher_obs)
+        finally:
+            self._teacher_mode = False
 
     def compute_proprio_only_state(self):
         """
@@ -1007,7 +1024,7 @@ class ShadowHandScissors(BaseTask):
         off = 0 if hand == 0 else 102
         extra = self.vec_sensor_tensor[:, off + 30:off + 102].view(self.num_envs, self.num_tactile_extra, 6)[:, :, :3]
         mags = torch.norm(extra, dim=-1)
-        if self.tactile_fingertips:
+        if self.tactile_fingertips and not getattr(self, "_teacher_mode", False):
             tips = self.vec_sensor_tensor[:, off:off + 30].view(self.num_envs, len(self.fingertips), 6)[:, :, :3]
             tip_mags = torch.norm(tips, dim=-1)
             if not getattr(self, "_gttac_tip_diag_done", False):
@@ -1018,7 +1035,7 @@ class ShadowHandScissors(BaseTask):
             mags = torch.cat([tip_mags, mags], dim=-1)
         return self.tactile_extra_obs_scale * mags
 
-    def compute_proprio_gttac_state(self):
+    def compute_proprio_gttac_state(self, buf=None):
         """
         Tactile-SR ablation "P+GT-tactile" arm: same as compute_proprio_only_state,
         but with a per-link coarse-tactile channel added back in (force magnitude
@@ -1054,52 +1071,53 @@ class ShadowHandScissors(BaseTask):
         333 - 335   left shadow hand base rotation
         336 - 361   left shadow hand actions
         """
+        _buf = self.obs_buf if buf is None else buf
         num_ft_states = 13 * int(self.num_fingertips / 2)  # 65
 
-        self.obs_buf[:, 0:self.num_shadow_hand_dofs] = unscale(self.shadow_hand_dof_pos,
+        _buf[:, 0:self.num_shadow_hand_dofs] = unscale(self.shadow_hand_dof_pos,
                                                             self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
-        self.obs_buf[:, self.num_shadow_hand_dofs:2*self.num_shadow_hand_dofs] = self.vel_obs_scale * self.shadow_hand_dof_vel
-        self.obs_buf[:, 2*self.num_shadow_hand_dofs:3*self.num_shadow_hand_dofs] = self.force_torque_obs_scale * self.dof_force_tensor[:, :24]
+        _buf[:, self.num_shadow_hand_dofs:2*self.num_shadow_hand_dofs] = self.vel_obs_scale * self.shadow_hand_dof_vel
+        _buf[:, 2*self.num_shadow_hand_dofs:3*self.num_shadow_hand_dofs] = self.force_torque_obs_scale * self.dof_force_tensor[:, :24]
 
         fingertip_obs_start = 72
-        self.obs_buf[:, fingertip_obs_start:fingertip_obs_start + num_ft_states] = self.fingertip_state.reshape(self.num_envs, num_ft_states)
+        _buf[:, fingertip_obs_start:fingertip_obs_start + num_ft_states] = self.fingertip_state.reshape(self.num_envs, num_ft_states)
 
         tactile_obs_start = fingertip_obs_start + num_ft_states
         right_tac = self._gttac_tactile(0)
         n_tac = right_tac.shape[-1]
-        self.obs_buf[:, tactile_obs_start:tactile_obs_start + n_tac] = right_tac
+        _buf[:, tactile_obs_start:tactile_obs_start + n_tac] = right_tac
 
         hand_pose_start = tactile_obs_start + n_tac
-        self.obs_buf[:, hand_pose_start:hand_pose_start + 3] = self.right_hand_pos
-        self.obs_buf[:, hand_pose_start+3:hand_pose_start+4] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[0].unsqueeze(-1)
-        self.obs_buf[:, hand_pose_start+4:hand_pose_start+5] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[1].unsqueeze(-1)
-        self.obs_buf[:, hand_pose_start+5:hand_pose_start+6] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[2].unsqueeze(-1)
+        _buf[:, hand_pose_start:hand_pose_start + 3] = self.right_hand_pos
+        _buf[:, hand_pose_start+3:hand_pose_start+4] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[0].unsqueeze(-1)
+        _buf[:, hand_pose_start+4:hand_pose_start+5] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[1].unsqueeze(-1)
+        _buf[:, hand_pose_start+5:hand_pose_start+6] = get_euler_xyz(self.hand_orientations[self.hand_indices, :])[2].unsqueeze(-1)
 
         action_obs_start = hand_pose_start + 6
-        self.obs_buf[:, action_obs_start:action_obs_start + 26] = self.actions[:, :26]
+        _buf[:, action_obs_start:action_obs_start + 26] = self.actions[:, :26]
 
         # another_hand
         another_hand_start = action_obs_start + 26
-        self.obs_buf[:, another_hand_start:self.num_shadow_hand_dofs + another_hand_start] = unscale(self.shadow_hand_another_dof_pos,
+        _buf[:, another_hand_start:self.num_shadow_hand_dofs + another_hand_start] = unscale(self.shadow_hand_another_dof_pos,
                                                             self.shadow_hand_dof_lower_limits, self.shadow_hand_dof_upper_limits)
-        self.obs_buf[:, self.num_shadow_hand_dofs + another_hand_start:2*self.num_shadow_hand_dofs + another_hand_start] = self.vel_obs_scale * self.shadow_hand_another_dof_vel
-        self.obs_buf[:, 2*self.num_shadow_hand_dofs + another_hand_start:3*self.num_shadow_hand_dofs + another_hand_start] = self.force_torque_obs_scale * self.dof_force_tensor[:, 24:48]
+        _buf[:, self.num_shadow_hand_dofs + another_hand_start:2*self.num_shadow_hand_dofs + another_hand_start] = self.vel_obs_scale * self.shadow_hand_another_dof_vel
+        _buf[:, 2*self.num_shadow_hand_dofs + another_hand_start:3*self.num_shadow_hand_dofs + another_hand_start] = self.force_torque_obs_scale * self.dof_force_tensor[:, 24:48]
 
         fingertip_another_obs_start = another_hand_start + 72
-        self.obs_buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
+        _buf[:, fingertip_another_obs_start:fingertip_another_obs_start + num_ft_states] = self.fingertip_another_state.reshape(self.num_envs, num_ft_states)
 
         tactile_another_obs_start = fingertip_another_obs_start + num_ft_states
         left_tac = self._gttac_tactile(1)
-        self.obs_buf[:, tactile_another_obs_start:tactile_another_obs_start + n_tac] = left_tac
+        _buf[:, tactile_another_obs_start:tactile_another_obs_start + n_tac] = left_tac
 
         hand_another_pose_start = tactile_another_obs_start + n_tac
-        self.obs_buf[:, hand_another_pose_start:hand_another_pose_start + 3] = self.left_hand_pos
-        self.obs_buf[:, hand_another_pose_start+3:hand_another_pose_start+4] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[0].unsqueeze(-1)
-        self.obs_buf[:, hand_another_pose_start+4:hand_another_pose_start+5] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[1].unsqueeze(-1)
-        self.obs_buf[:, hand_another_pose_start+5:hand_another_pose_start+6] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[2].unsqueeze(-1)
+        _buf[:, hand_another_pose_start:hand_another_pose_start + 3] = self.left_hand_pos
+        _buf[:, hand_another_pose_start+3:hand_another_pose_start+4] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[0].unsqueeze(-1)
+        _buf[:, hand_another_pose_start+4:hand_another_pose_start+5] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[1].unsqueeze(-1)
+        _buf[:, hand_another_pose_start+5:hand_another_pose_start+6] = get_euler_xyz(self.hand_orientations[self.another_hand_indices, :])[2].unsqueeze(-1)
 
         action_another_obs_start = hand_another_pose_start + 6
-        self.obs_buf[:, action_another_obs_start:action_another_obs_start + 26] = self.actions[:, 26:]
+        _buf[:, action_another_obs_start:action_another_obs_start + 26] = self.actions[:, 26:]
         # (object/goal tail intentionally omitted entirely -- not proprioception, matches proprio_only)
 
     def _predtac_lazy_init(self):
