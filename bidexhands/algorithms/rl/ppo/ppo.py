@@ -112,28 +112,32 @@ class PPO:
         assert for every one of those tasks. 'successes' is per-env-sized consistently
         across all of them (confirmed via grep), so it's the safe/universal choice.
         """
+        # Fixed number of episodes PER ENV (K = ceil(num_episodes / num_envs)): collecting "the first num_episodes
+        # episodes to finish" over-represents short episodes, and a success ends an episode early, so that scheme biases
+        # the success rate upward. Every env contributes exactly its first K finished episodes here.
+        import math
+        n_env = self.vec_env.num_envs
+        K = max(1, math.ceil(num_episodes / n_env))
+        cnt = torch.zeros(n_env, dtype=torch.long)
         current_obs = self.vec_env.reset()
         successes = []
         with torch.no_grad():
-            while len(successes) < num_episodes:
+            while bool((cnt < K).any()):
                 actions = self.actor_critic.act_inference(current_obs)
                 next_obs, rews, dones, infos = self.vec_env.step(actions)
                 current_obs.copy_(next_obs)
                 done_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
                 if done_ids.numel() > 0 and isinstance(infos, dict) and 'successes' in infos:
-                    # infos['successes'] and dones/done_ids are not guaranteed to live on
-                    # the same device (found live 2026-09-14, resuming ShadowHandPen with
-                    # --model_dir under --pipeline=cpu: dones came back on cuda:0 while
-                    # task.extras['successes'] stayed on cpu, raising "indices should be
-                    # either on cpu or on the same device as the indexed tensor" on every
-                    # resume -- this eval() only runs on the --model_dir/resume path, so a
-                    # fresh run never hit it). Move the indices, not the indexed tensor, to
-                    # avoid an extra full-tensor copy every step.
-                    successes.extend(
-                        infos['successes'][done_ids.to(infos['successes'].device)].cpu().tolist())
-        successes = successes[:num_episodes]
+                    # indices and the indexed tensor may live on different devices (see the --pipeline=cpu note in git
+                    # history): move the indices, keep the bookkeeping on cpu.
+                    vals = infos['successes'][done_ids.to(infos['successes'].device)].cpu().tolist()
+                    ids = done_ids.cpu()
+                    for i, v in zip(ids.tolist(), vals):
+                        if cnt[i] < K:
+                            successes.append(v)
+                            cnt[i] += 1
         mean_success = 100.0 * sum(successes) / len(successes) if successes else float('nan')
-        print(f"Held-out eval over {len(successes)} episodes: mean success rate = {mean_success:.2f}%")
+        print(f"Held-out eval over {len(successes)} episodes ({K} per env x {n_env} envs): mean success rate = {mean_success:.2f}%")
         return mean_success, successes
 
     def run(self, num_learning_iterations, log_interval=1):

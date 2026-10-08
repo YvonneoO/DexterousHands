@@ -5,6 +5,7 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+import os
 from ast import arg
 import numpy as np
 import random
@@ -71,7 +72,7 @@ def train():
         # Scissors PREDTAC_BLOCKING ablation runs did zero additional training
         # this way, discovered only because their logs never printed a single
         # "Learning iteration" line.
-        runner.eval(num_episodes=100)
+        runner.eval(num_episodes=int(os.environ.get("EVAL_EPISODES", 100)))
     elif args.algo in META_ALGOS:
         runner.train(train_epoch=iterations)
     else:
