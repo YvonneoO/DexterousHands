@@ -68,6 +68,7 @@ class NoisyTactileModel:
         self.mu = _per_link(p["mu"], device) if "mu" in p else -0.5 * self.sigma ** 2
         self.z_ev = torch.randn(num_envs, 2, NUM_LINKS, device=device)
         self.z_mag = torch.randn(num_envs, 2, NUM_LINKS, device=device)
+        self._calls, self._tc_sum, self._det_sum = 0, torch.zeros(NUM_LINKS, device=device), torch.zeros(NUM_LINKS, device=device)
         tag = "calibrated params from " + str(params_path) if p["calibrated"] else "PLACEHOLDER params (NOT measured)"
         print(f"[noisy_tactile] {tag}: thr={self.thr} rho={self.rho} "
               f"scale[0]={self.scale[0].item():.4f} tpr[0]={self.tpr[0].item():.2f} "
@@ -93,4 +94,12 @@ class NoisyTactileModel:
         miss = torch.minimum(mag, torch.full_like(mag, 0.95 * self.thr))
         cont = torch.where(detect, hit, miss).clamp(0.0, 1.0)
         binary = (cont > self.thr).float()
+        self._calls += 1
+        self._tc_sum += true_contact.float().mean(dim=(0, 1))
+        self._det_sum += binary.mean(dim=(0, 1))
+        if self._calls in (200, 2000) or self._calls % 20000 == 0:
+            tc = (self._tc_sum / self._calls).tolist()
+            dt = (self._det_sum / self._calls).tolist()
+            print(f"[noisy_tactile][diag] calls={self._calls} per-link rate (sorted names): " + " ".join(
+                f"{n}:gt={a:.3f}/out={b:.3f}" for n, a, b in zip(LINK_NAMES, tc, dt)), flush=True)
         return cont, binary

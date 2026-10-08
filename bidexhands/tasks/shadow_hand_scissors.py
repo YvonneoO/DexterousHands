@@ -1131,7 +1131,8 @@ class ShadowHandScissors(BaseTask):
         if not hasattr(self, "_noisy_tactile_model"):
             from tactile_collection.noisy_tactile import NoisyTactileModel
             self._noisy_tactile_model = NoisyTactileModel(
-                self.num_envs, self.device, self.cfg["env"].get("noisyTactileParams"))
+                self.num_envs, self.device,
+                self.cfg["env"].get("noisyTactileParams") or os.environ.get("NOISY_TACTILE_PARAMS"))
             pred_names = sorted([f + seg for f in ("ff", "mf", "rf", "lf") for seg in ("distal", "middle", "proximal")]
                                 + ["thdistal", "thmiddle", "thproximal", "palm", "lfmetacarpal"])
             gt_names = [n.split(":")[1] for n in self.fingertips] + [n.split(":")[1] for n in self.tactile_extra_links]
