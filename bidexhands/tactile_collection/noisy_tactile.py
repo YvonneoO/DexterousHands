@@ -14,6 +14,13 @@ sorted-name order):
   cont   = detect ? max(mag, thr*(1.05+0.5u)) : min(mag, 0.95*thr)
 Errors persist across consecutive steps via an AR(1) latent (rho), like a visual predictor's errors.
 
+PLACEBO controls (env NOISY_TACTILE_PLACEBO, default "none"): the tactile obs keeps its exact shape / marginals but carries no
+information about the env's own contact, to test whether the policy gains from the tactile SIGNAL or just from extra input dims:
+  shuffle : each env receives another env's (noisy) tactile signal (fixed derangement of the env axis) -- same marginals AND
+            temporal statistics as the real arm, zero mutual information with its own state
+  uniform : i.i.d. U(0,1) per link/hand/step (binary = cont > thr)
+  mean    : constant per-link running mean of the noisy output (carries no information at all)
+
 !! The default parameters are PLACEHOLDERS (smoke-test values), not measured. Calibrate scale / tpr /
 !! fpr / sigma / rho from predictor-vs-GT statistics on held-out sim episodes and pass them via a JSON
 !! file (cfg env.noisyTactileParams): {"threshold":.., "scale":[17], "tpr":[17], "fpr":[17], "sigma":[17], "mu":[17], "rho":..}
@@ -25,6 +32,7 @@ inside the 79-cell palm region and receive both forces), so BOTH pooled GT value
 """
 import json
 import math
+import os
 
 import torch
 
@@ -66,13 +74,20 @@ class NoisyTactileModel:
         self.fpr = _per_link(p["fpr"], device)
         self.sigma = _per_link(p["sigma"], device)
         self.mu = _per_link(p["mu"], device) if "mu" in p else -0.5 * self.sigma ** 2
+        self.placebo = os.environ.get("NOISY_TACTILE_PLACEBO", "none").lower()
+        assert self.placebo in ("none", "shuffle", "uniform", "mean"), self.placebo
+        order = torch.randperm(num_envs, device=device)
+        self._shuffle_perm = torch.empty_like(order)
+        self._shuffle_perm[order] = torch.roll(order, -1)  # derangement: env i gets env perm[i] != i
+        self._cont_mean = torch.zeros(NUM_LINKS, device=device)
+        self._bin_mean = torch.zeros(NUM_LINKS, device=device)
         self.z_ev = torch.randn(num_envs, 2, NUM_LINKS, device=device)
         self.z_mag = torch.randn(num_envs, 2, NUM_LINKS, device=device)
         self._calls, self._tc_sum, self._det_sum = 0, torch.zeros(NUM_LINKS, device=device), torch.zeros(NUM_LINKS, device=device)
         tag = "calibrated params from " + str(params_path) if p["calibrated"] else "PLACEHOLDER params (NOT measured)"
         print(f"[noisy_tactile] {tag}: thr={self.thr} rho={self.rho} "
               f"scale[0]={self.scale[0].item():.4f} tpr[0]={self.tpr[0].item():.2f} "
-              f"fpr[0]={self.fpr[0].item():.3f} sigma[0]={self.sigma[0].item():.2f}", flush=True)
+              f"fpr[0]={self.fpr[0].item():.3f} sigma[0]={self.sigma[0].item():.2f} placebo={self.placebo}", flush=True)
 
     def _ar1(self, z):
         return self.rho * z + math.sqrt(max(0.0, 1.0 - self.rho ** 2)) * torch.randn_like(z)
@@ -94,6 +109,17 @@ class NoisyTactileModel:
         miss = torch.minimum(mag, torch.full_like(mag, 0.95 * self.thr))
         cont = torch.where(detect, hit, miss).clamp(0.0, 1.0)
         binary = (cont > self.thr).float()
+        if self.placebo == "shuffle":
+            cont, binary = cont[self._shuffle_perm], binary[self._shuffle_perm]
+        elif self.placebo == "uniform":
+            cont = torch.rand_like(cont)
+            binary = (cont > self.thr).float()
+        elif self.placebo == "mean":
+            n = self._calls + 1
+            self._cont_mean += (cont.mean(dim=(0, 1)) - self._cont_mean) / n
+            self._bin_mean += (binary.mean(dim=(0, 1)) - self._bin_mean) / n
+            cont = self._cont_mean.expand_as(cont).clone()
+            binary = self._bin_mean.expand_as(binary).clone()
         self._calls += 1
         self._tc_sum += true_contact.float().mean(dim=(0, 1))
         self._det_sum += binary.mean(dim=(0, 1))
