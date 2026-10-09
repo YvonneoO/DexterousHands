@@ -15,7 +15,9 @@ caveat on the offline side. gt_pose_crop.py's `sides` dict uses string keys
 ("left"/"right") so this client is the one place that commits to a fixed
 slot order for the wire format.
 """
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -46,6 +48,8 @@ class PredTacClient:
         # session a bogus high-water-mark tick and silently freeze it on one
         # stale frame for the rest of the run (found live 2026-09-14).
         predtac_ipc.reset_run(run_id)
+        self._sim_crop = os.environ.get("PREDTAC_SIM_CROP", "0") == "1"
+        self._pool = ThreadPoolExecutor(max_workers=int(os.environ.get("PREDTAC_CROP_THREADS", "2"))) if self._sim_crop else None
 
     def submit(self, frames_uint8, sides_all_envs):
         """frames_uint8: (num_envs,H,W,3) uint8, one rendered frame per env
@@ -61,7 +65,15 @@ class PredTacClient:
                 if info is not None:
                     boxes[i, h] = info["box"]
                     has_hand[i, h] = True
-        predtac_ipc.write_request(self.run_id, self._tick, frames_uint8, boxes, has_hand)
+        if self._sim_crop:
+            # PREDTAC_SIM_CROP=1: crop/resize here (cv2, thread pool) and send ~0.55 MB/env instead of the 2.07 MB
+            # full frame -- the server then does no CPU cropping (see predtac_crop.py)
+            from tactile_collection import predtac_crop
+            small, crops = predtac_crop.build_payload(frames_uint8, boxes, has_hand, pool=self._pool)
+            predtac_ipc.write_request_v2(self.run_id, self._tick, small, crops, boxes, has_hand)
+            frames_uint8 = (small, crops)       # cached for poll_blocking's resubmission
+        else:
+            predtac_ipc.write_request(self.run_id, self._tick, frames_uint8, boxes, has_hand)
         self._tick += 1
         self._last_frames = frames_uint8
         self._last_boxes = boxes
@@ -164,8 +176,12 @@ class PredTacClient:
                       f"falling back to stale value", flush=True)
                 break
             if now > next_resubmit and self._last_frames is not None:
-                predtac_ipc.write_request(self.run_id, self._tick, self._last_frames,
-                                           self._last_boxes, self._last_has_hand)
+                if self._sim_crop:
+                    predtac_ipc.write_request_v2(self.run_id, self._tick, self._last_frames[0], self._last_frames[1],
+                                                  self._last_boxes, self._last_has_hand)
+                else:
+                    predtac_ipc.write_request(self.run_id, self._tick, self._last_frames,
+                                               self._last_boxes, self._last_has_hand)
                 self._tick += 1
                 next_resubmit = now + resubmit_interval_s
             time.sleep(poll_interval_s)

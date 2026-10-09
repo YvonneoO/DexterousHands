@@ -68,6 +68,21 @@ def write_request(run_id, tick, frames_uint8, boxes, has_hand):
     )
 
 
+def write_request_v2(run_id, tick, small_rgb, crops, boxes, has_hand):
+    """Pre-processed request (predtac_crop.build_payload): small_rgb (N,224,224,3) uint8 for the DINO branch, crops
+    (N,2,256,256,3) uint8 WiLoR hand crops (RGB, left hands already mirrored, zeros where has_hand is False). ~4x smaller
+    than write_request's full 960x720 frames, and the server does no CPU cropping. The server tells the two apart by
+    the presence of the "small" key."""
+    _atomic_write_npz(
+        request_path(run_id),
+        tick=np.asarray(tick, dtype=np.int64),
+        small=np.asarray(small_rgb, dtype=np.uint8),
+        crops=np.asarray(crops, dtype=np.uint8),
+        boxes=np.asarray(boxes, dtype=np.float32),
+        has_hand=np.asarray(has_hand, dtype=bool),
+    )
+
+
 def read_request(run_id):
     """Returns None if no request has been written yet, or if it's mid-write
     on this exact call (rare race, self-heals next poll -- os.replace makes
@@ -77,12 +92,17 @@ def read_request(run_id):
         return None
     try:
         with np.load(path) as data:
-            return {
+            out = {
                 "tick": int(data["tick"]),
-                "frames": data["frames"],
                 "boxes": data["boxes"],
                 "has_hand": data["has_hand"],
             }
+            if "small" in data.files:          # write_request_v2 payload (sim-side crops)
+                out["small"] = data["small"]
+                out["crops"] = data["crops"]
+            else:                              # write_request payload (full frames)
+                out["frames"] = data["frames"]
+            return out
     except (OSError, ValueError, EOFError):
         return None
 
