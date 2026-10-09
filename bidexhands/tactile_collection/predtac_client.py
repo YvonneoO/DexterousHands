@@ -47,9 +47,19 @@ class PredTacClient:
         # Without this, a stale leftover response can hand a brand-new
         # session a bogus high-water-mark tick and silently freeze it on one
         # stale frame for the rest of the run (found live 2026-09-14).
-        predtac_ipc.reset_run(run_id)
         self._sim_crop = os.environ.get("PREDTAC_SIM_CROP", "0") == "1"
         self._pool = ThreadPoolExecutor(max_workers=int(os.environ.get("PREDTAC_CROP_THREADS", "2"))) if self._sim_crop else None
+        # PREDTAC_NUM_SHARDS=M>1: the envs are split into M contiguous slices, slice k talks to its OWN predtac_server
+        # process under run_id "<run_id>_s<k>" (server launched with --num_envs = slice size). Needs PREDTAC_SIM_CROP=1
+        # (the small payload is what makes M independent request files cheap). M=1 keeps the original single run_id.
+        self.num_shards = int(os.environ.get("PREDTAC_NUM_SHARDS", "1"))
+        assert self.num_shards == 1 or self._sim_crop, "PREDTAC_NUM_SHARDS>1 requires PREDTAC_SIM_CROP=1"
+        parts = np.array_split(np.arange(num_envs), self.num_shards)
+        self._shard_slices = [(int(p[0]), int(p[-1]) + 1) for p in parts if p.size > 0]
+        self._shard_runs = [run_id] if self.num_shards == 1 else [f"{run_id}_s{k}" for k in range(len(self._shard_slices))]
+        self._shard_tick_seen = [-1] * len(self._shard_runs)
+        for r in self._shard_runs:
+            predtac_ipc.reset_run(r)
 
     def submit(self, frames_uint8, sides_all_envs):
         """frames_uint8: (num_envs,H,W,3) uint8, one rendered frame per env
@@ -70,7 +80,7 @@ class PredTacClient:
             # full frame -- the server then does no CPU cropping (see predtac_crop.py)
             from tactile_collection import predtac_crop
             small, crops = predtac_crop.build_payload(frames_uint8, boxes, has_hand, pool=self._pool)
-            predtac_ipc.write_request_v2(self.run_id, self._tick, small, crops, boxes, has_hand)
+            self._write_shards(self._tick, small, crops, boxes, has_hand)
             frames_uint8 = (small, crops)       # cached for poll_blocking's resubmission
         else:
             predtac_ipc.write_request(self.run_id, self._tick, frames_uint8, boxes, has_hand)
@@ -79,14 +89,20 @@ class PredTacClient:
         self._last_boxes = boxes
         self._last_has_hand = has_hand
 
+    def _write_shards(self, tick, small, crops, boxes, has_hand):
+        for run, (a, b) in zip(self._shard_runs, self._shard_slices):
+            predtac_ipc.write_request_v2(run, tick, small[a:b], crops[a:b], boxes[a:b], has_hand[a:b])
+
     def poll(self):
         """Non-blocking. Updates self.continuous/self.binary in place if a
         newer server response is available; always returns the current
         (possibly stale, possibly still all-zero before the first response)
         (continuous, binary) pair, each (num_envs, 2, num_links)."""
-        resp = predtac_ipc.read_response(self.run_id)
-        if resp is not None and resp["tick"] > self.last_tick_seen:
-            self.last_tick_seen = resp["tick"]
+        for k, (run, (a, b)) in enumerate(zip(self._shard_runs, self._shard_slices)):
+            resp = predtac_ipc.read_response(run)
+            if resp is None or resp["tick"] <= self._shard_tick_seen[k]:
+                continue
+            self._shard_tick_seen[k] = resp["tick"]
             # Defensive: a degenerate frame (e.g. no hand detected, a
             # transient WiLoR/DINO failure) can in principle leak NaN out of
             # the server's pooling -- found live 2026-09-14 on VTDexManip's
@@ -98,8 +114,10 @@ class PredTacClient:
             # before any response has ever arrived, so replacing NaN with 0
             # here is consistent with that existing convention, not a new
             # semantics.
-            self.continuous = np.nan_to_num(resp["continuous"], nan=0.0)
-            self.binary = np.nan_to_num(resp["binary"], nan=0.0)
+            self.continuous[a:b] = np.nan_to_num(resp["continuous"], nan=0.0)
+            self.binary[a:b] = np.nan_to_num(resp["binary"], nan=0.0)
+        # the worst (oldest) shard defines how fresh the whole reading is -- staleness/blocking use this
+        self.last_tick_seen = min(self._shard_tick_seen)
         return self.continuous, self.binary
 
     def staleness_ticks(self):
@@ -177,8 +195,8 @@ class PredTacClient:
                 break
             if now > next_resubmit and self._last_frames is not None:
                 if self._sim_crop:
-                    predtac_ipc.write_request_v2(self.run_id, self._tick, self._last_frames[0], self._last_frames[1],
-                                                  self._last_boxes, self._last_has_hand)
+                    self._write_shards(self._tick, self._last_frames[0], self._last_frames[1],
+                                       self._last_boxes, self._last_has_hand)
                 else:
                     predtac_ipc.write_request(self.run_id, self._tick, self._last_frames,
                                                self._last_boxes, self._last_has_hand)
