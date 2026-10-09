@@ -28,11 +28,11 @@ os.environ.setdefault("BIDEX_HAND_COLOR_SAME", "1")
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
-import torch  # noqa: E402
 
 from bidexhands.utils.config import get_args, load_cfg, parse_sim_params, set_np_formatting, set_seed  # noqa: E402
 from bidexhands.utils.parse_task import parse_task  # noqa: E402
 from bidexhands.utils.process_marl import get_AgentIndex  # noqa: E402
+import torch  # noqa: E402  (must come AFTER the isaacgym-importing bidexhands modules)
 
 from tactile_collection.multi_env_camera import apply_visual_style_all_envs, create_cameras  # noqa: E402
 from tactile_collection.gt_pose_crop import build_bimanual_boxes_all_envs  # noqa: E402
