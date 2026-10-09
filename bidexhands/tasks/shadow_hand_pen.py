@@ -1249,10 +1249,19 @@ class ShadowHandPen(BaseTask):
             # Position cameras (and compute their boxes) BEFORE rendering --
             # render_all_and_capture must see the transform just set below, not
             # last tick's (or, on the very first call, the sensor's default).
-            sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
-                self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
-            frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
-            self._predtac_client.submit(frames, sides_all_envs)
+            # PREDTAC_CAPTURE_EVERY=N: render/crop/submit only every N-th env step (the server's training-time window
+            # uses every 2nd frame anyway; N=2 halves the sim-side camera cost, launch the servers with
+            # FRAME_INTERVAL=2/N so they do not decimate a second time). Other steps just poll the latest response.
+            if not hasattr(self, "_predtac_capture_every"):
+                self._predtac_capture_every = int(os.environ.get("PREDTAC_CAPTURE_EVERY", "1"))
+                self._predtac_step = -1
+            self._predtac_step += 1
+            _submitted = (self._predtac_step % self._predtac_capture_every) == 0
+            if _submitted:
+                sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
+                    self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
+                frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
+                self._predtac_client.submit(frames, sides_all_envs)
             # PREDTAC_BLOCKING=1 trades sim throughput for near-zero staleness --
             # waits for the response matching the tick just submitted instead of
             # taking whatever poll() finds freshest. Off by default (unchanged
@@ -1260,7 +1269,7 @@ class ShadowHandPen(BaseTask):
             # prediction-quality as separate confounds, or for a training-time
             # ablation testing whether stale tactile is actively harmful during
             # learning (not just uninformative).
-            if os.environ.get("PREDTAC_BLOCKING", "0") == "1":
+            if os.environ.get("PREDTAC_BLOCKING", "0") == "1" and _submitted:
                 continuous_np, binary_np = self._predtac_client.poll_blocking()
             else:
                 continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right

@@ -1197,13 +1197,22 @@ class ShadowHandScissors(BaseTask):
             if not hasattr(self, "_predtac_client"):
                 self._predtac_lazy_init()
 
-            sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
-                self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
-            frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
-            self._predtac_client.submit(frames, sides_all_envs)
+            # PREDTAC_CAPTURE_EVERY=N: render/crop/submit only every N-th env step (the server's training-time window
+            # uses every 2nd frame anyway; N=2 halves the sim-side camera cost, launch the servers with
+            # FRAME_INTERVAL=2/N so they do not decimate a second time). Other steps just poll the latest response.
+            if not hasattr(self, "_predtac_capture_every"):
+                self._predtac_capture_every = int(os.environ.get("PREDTAC_CAPTURE_EVERY", "1"))
+                self._predtac_step = -1
+            self._predtac_step += 1
+            _submitted = (self._predtac_step % self._predtac_capture_every) == 0
+            if _submitted:
+                sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
+                    self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
+                frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
+                self._predtac_client.submit(frames, sides_all_envs)
             # PREDTAC_BLOCKING=1 trades sim throughput for near-zero staleness --
             # see shadow_hand_pen.py's identical block for the full rationale.
-            if os.environ.get("PREDTAC_BLOCKING", "0") == "1":
+            if os.environ.get("PREDTAC_BLOCKING", "0") == "1" and _submitted:
                 continuous_np, binary_np = self._predtac_client.poll_blocking()
             else:
                 continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
