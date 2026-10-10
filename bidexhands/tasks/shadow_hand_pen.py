@@ -1262,6 +1262,9 @@ class ShadowHandPen(BaseTask):
                     self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
                 frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
                 self._predtac_client.submit(frames, sides_all_envs)
+                if os.environ.get("PREDTAC_DUMP_DIR"):
+                    from tactile_collection.predtac_quality import dump_frames
+                    dump_frames(frames, sides_all_envs, self._predtac_step)
             # PREDTAC_BLOCKING=1 trades sim throughput for near-zero staleness --
             # waits for the response matching the tick just submitted instead of
             # taking whatever poll() finds freshest. Off by default (unchanged

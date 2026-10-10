@@ -111,3 +111,32 @@ class QualityMonitor:
               f"corr@lag(env steps): " + " ".join(f"{k}:{corr[k]:.3f}" for k in range(len(corr)) if valid[k]) +
               f" | best_lag={best} | k=0 tpr={tpr[0]:.3f} fpr={fpr[0]:.4f} | k=best tpr={tpr[best]:.3f} fpr={fpr[best]:.4f}",
               flush=True)
+
+
+_DUMP = {"n": 0}
+
+
+def dump_frames(frames, sides_all_envs, step, extra=None):
+    """Diagnostic (env PREDTAC_DUMP_DIR): save a few of the frames the predictor server is actually served, together with the
+    ground-truth-pose hand boxes keyed as sent (left/right), so scripts/.../analyze_predtac_boxes.py can compare them with the
+    SAM3 boxes the training cache was built from. Every PREDTAC_DUMP_EVERY (40) submitted steps, envs 0..PREDTAC_DUMP_ENVS-1,
+    at most PREDTAC_DUMP_MAX (40) dumps."""
+    import json
+    import cv2
+    d = os.environ.get("PREDTAC_DUMP_DIR")
+    if not d or _DUMP["n"] >= int(os.environ.get("PREDTAC_DUMP_MAX", "40")):
+        return
+    if step % int(os.environ.get("PREDTAC_DUMP_EVERY", "40")) != 0:
+        return
+    os.makedirs(os.path.join(d, "frames"), exist_ok=True)
+    rows = []
+    for i in range(int(os.environ.get("PREDTAC_DUMP_ENVS", "3"))):
+        name = f"s{step:06d}_e{i}.png"
+        cv2.imwrite(os.path.join(d, "frames", name), cv2.cvtColor(frames[i], cv2.COLOR_RGB2BGR))
+        rows.append({"file": name, "step": int(step), "env": i,
+                     "boxes": {k: [float(x) for x in v["box"]] for k, v in sides_all_envs[i].items()},
+                     "hw": [int(frames[i].shape[0]), int(frames[i].shape[1])]})
+    with open(os.path.join(d, "meta.jsonl"), "a") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    _DUMP["n"] += 1
