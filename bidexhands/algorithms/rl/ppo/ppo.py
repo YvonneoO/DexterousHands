@@ -92,12 +92,22 @@ class PPO:
         self.actor_critic.load_state_dict(torch.load(path))
         base = os.path.basename(path)
         # "model_<it>.pt" -> iteration from the file name; "latest_model.pt" -> iteration from its state file
-        state_path = os.path.join(os.path.dirname(path), base.replace("model_", "state_", 1))
+        # NB "latest_model.pt".replace("model_", ...) is a no-op (no underscore after "model"): map it explicitly, otherwise the model
+        # weights themselves get loaded as the "state" (KeyError: 'iteration', which killed every chained resume link)
+        state_name = "latest_state.pt" if base == "latest_model.pt" else base.replace("model_", "state_", 1)
+        state_path = os.path.join(os.path.dirname(path), state_name)
         state = torch.load(state_path, map_location=self.device) if os.path.isfile(state_path) else None
+        if state is not None and not (isinstance(state, dict) and "optimizer" in state and "iteration" in state):
+            print(f"[ppo] WARNING {state_path} is not a PPO state file; weights-only resume", flush=True)
+            state = None
         if base.startswith("latest_") and state is not None:
             self.current_learning_iteration = int(state["iteration"])
         else:
-            self.current_learning_iteration = int(path.split("_")[-1].split(".")[0])
+            try:
+                self.current_learning_iteration = int(path.split("_")[-1].split(".")[0])
+            except ValueError:               # latest_model.pt without a usable state file: iteration unknown
+                print(f"[ppo] WARNING iteration of {path} unknown (no state file) -> 0", flush=True)
+                self.current_learning_iteration = 0
         if state is not None:
             # full resume: Adam moments, the (adaptive-KL) learning rate and the step/time counters
             self.optimizer.load_state_dict(state["optimizer"])
