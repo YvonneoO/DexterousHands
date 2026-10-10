@@ -1282,6 +1282,13 @@ class ShadowHandPen(BaseTask):
                 print(f"[predtac][staleness] client_tick={self._predtac_client._tick} "
                       f"stale_ticks={_stale}", flush=True)
 
+            if os.environ.get("PREDTAC_QUALITY_LOG", "0") == "1":
+                # online input-quality monitor: predicted tactile vs sim ground truth + effective lag (predtac_quality.py)
+                if not hasattr(self, "_predtac_quality"):
+                    from tactile_collection.predtac_quality import QualityMonitor
+                    self._predtac_quality = QualityMonitor(self)
+                self._predtac_quality.update(continuous_np, binary_np, _stale, self._predtac_capture_every)
+
             continuous_raw = _torch.from_numpy(continuous_np).to(self.device)
             binary_raw = _torch.from_numpy(binary_np).to(self.device)  # already 0/1
         continuous = self.predtac_continuous_obs_scale * continuous_raw
