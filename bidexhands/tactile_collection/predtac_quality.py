@@ -4,8 +4,8 @@ estimates the effective time lag of the response.
 
 Ground truth: per hand, per link force magnitude from vec_sensor_tensor (same extraction as the noisy-GT path), palm /
 lfmetacarpal overlap handled as in noisy_tactile.py, converted to the predictor's normalised pressure g = clamp(F * scale):
-scale from PREDTAC_QUALITY_PARAMS (a calibrate_noisy_tactile.py params json: "scale"[17]) times PREDTAC_QUALITY_VMAX_RATIO
-(vmax of that calibration / vmax the served predictor was trained with).
+scale: analytic |F|/(W*L)/PREDTAC_QUALITY_VMAX (vmax = the served predictor's per-task normaliser), or "scale"[17] of a
+PREDTAC_QUALITY_PARAMS json (calibrate_noisy_tactile.py) times PREDTAC_QUALITY_VMAX_RATIO.
 
 Every PREDTAC_QUALITY_EVERY (200) env steps one line is printed, over that window, with the current response (c, b) compared to
 the GT g of k env steps ago for k = 0..K:
@@ -34,9 +34,23 @@ class QualityMonitor:
         if path:
             with open(path) as f:
                 params = json.load(f)
-        scale = torch.as_tensor(params.get("scale", 0.02), dtype=torch.float32, device=self.device)
-        scale = scale.expand(NUM_LINKS).clone() if scale.ndim == 0 else scale.reshape(NUM_LINKS)
-        self.scale = scale * float(os.environ.get("PREDTAC_QUALITY_VMAX_RATIO", "1.0"))
+        if "scale" in params:
+            scale = torch.as_tensor(params["scale"], dtype=torch.float32, device=self.device).reshape(NUM_LINKS)
+            scale = scale * float(os.environ.get("PREDTAC_QUALITY_VMAX_RATIO", "1.0"))
+        else:
+            # analytic force (N) -> normalised pooled pressure: |F| / (W*L) / vmax, vmax = the served predictor's per-task
+            # normaliser (calibrate_noisy_tactile.py's analytic_scale; palm / lfmetacarpal share the palm area)
+            vmax = float(os.environ.get("PREDTAC_QUALITY_VMAX", "0"))
+            assert vmax > 0, "set PREDTAC_QUALITY_VMAX (the task's pressure normaliser) or PREDTAC_QUALITY_PARAMS"
+            WL = {"distal": 3.666e-4, "middle": 4.025e-4, "proximal": 9.0e-4,
+                  "thdistal": 5.049e-4, "thmiddle": 7.04e-4, "thproximal": 9.88e-4}
+            palm_area = 0.064 * 0.098 + 0.022 * 0.050
+            sc = []
+            for n in LINK_NAMES:
+                a = palm_area if n in ("palm", "lfmetacarpal") else (WL[n] if n.startswith("th") else WL[n[2:]])
+                sc.append(1.0 / (a * vmax))
+            scale = torch.as_tensor(sc, dtype=torch.float32, device=self.device)
+        self.scale = scale
         self.thr = float(params.get("threshold", 0.1))
         gt_names = [n.split(":")[1] for n in task.fingertips] + [n.split(":")[1] for n in task.tactile_extra_links]
         self.perm = torch.as_tensor([gt_names.index(n) for n in LINK_NAMES], device=self.device, dtype=torch.long)
