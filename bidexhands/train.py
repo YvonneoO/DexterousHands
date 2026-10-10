@@ -79,7 +79,7 @@ def train():
         # env cfg `saveInterval` (optional) overrides the PPO config's save_interval: this
         # arg is only ever used as the checkpoint cadence (PPO.run saves when it % log_interval == 0),
         # so short-walltime chained jobs can checkpoint often without touching cfg/ppo/config.yaml.
-        save_interval = int(cfg["env"].get("saveInterval", cfg_train["learn"]["save_interval"]))
+        save_interval = int(os.environ.get("PPO_SAVE_INTERVAL", cfg["env"].get("saveInterval", cfg_train["learn"]["save_interval"])))
         runner.run(num_learning_iterations=iterations, log_interval=save_interval)
         
 if __name__ == '__main__':
