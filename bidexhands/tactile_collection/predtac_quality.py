@@ -216,6 +216,8 @@ def dump_frames(frames, sides_all_envs, step, extra=None):
         rows.append({"file": name, "step": int(step), "env": i,
                      "boxes": {k: [float(x) for x in v["box"]] for k, v in sides_all_envs[i].items()},
                      "hw": [int(frames[i].shape[0]), int(frames[i].shape[1])]})
+        for k, v in (extra or {}).items():                     # per-env values (list/array indexed by env) or scalars
+            rows[-1][k] = (v[i].item() if hasattr(v[i], "item") else v[i]) if hasattr(v, "__len__") else v
     with open(os.path.join(d, "meta.jsonl"), "a") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
