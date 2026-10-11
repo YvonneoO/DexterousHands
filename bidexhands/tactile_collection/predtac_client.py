@@ -63,6 +63,8 @@ class PredTacClient:
         self._valid_from = np.zeros(num_envs, dtype=np.int64)
         self._last_reset = None
         self._wait = {"n": 0, "sum": 0.0, "max": 0.0}
+        self._mode, self._mode_src = self._resolve_mode()
+        print(f"[predtac] read mode = {self._mode} (from {self._mode_src})", flush=True)
         for r in self._shard_runs:
             predtac_ipc.reset_run(r)
 
@@ -160,6 +162,29 @@ class PredTacClient:
             return None  # no response ever received -- still serving all-zero fallback
         return (self._tick - 1) - self.last_tick_seen
 
+    @staticmethod
+    def _resolve_mode():
+        """How the task reads the predictor: "async" | "blocking" | "pipeline". Priority: env PREDTAC_MODE, then the one-line file
+        <PREDTAC_IPC_ROOT>/mode.txt (so a job that is already queued can be switched without resubmitting: the file is read when the
+        client is created, i.e. at the start of each chain link), then the legacy flags PREDTAC_PIPELINE=1 / PREDTAC_BLOCKING=1."""
+        ok = ("async", "blocking", "pipeline")
+        m = os.environ.get("PREDTAC_MODE", "").strip().lower()
+        if m in ok:
+            return m, "env PREDTAC_MODE"
+        f = os.environ.get("PREDTAC_MODE_FILE", os.path.join(predtac_ipc.IPC_ROOT, "mode.txt"))
+        try:
+            with open(f) as fh:
+                m = fh.read().strip().lower()
+            if m in ok:
+                return m, f"file {f}"
+        except OSError:
+            pass
+        if os.environ.get("PREDTAC_PIPELINE", "0") == "1":
+            return "pipeline", "legacy env PREDTAC_PIPELINE"
+        if os.environ.get("PREDTAC_BLOCKING", "0") == "1":
+            return "blocking", "legacy env PREDTAC_BLOCKING"
+        return "async", "default"
+
     def _note_wait(self, mode, dt):
         w = self._wait
         w["n"] += 1; w["sum"] += dt; w["max"] = max(w["max"], dt)
@@ -174,9 +199,9 @@ class PredTacClient:
                             capture interval while the server works on the newest frame; fixed staleness of one capture, no drops
                             as long as the server needs less than one sim capture interval + the wait);
         otherwise           asynchronous (take whatever is freshest). Steps that did not capture never wait."""
-        if submitted and os.environ.get("PREDTAC_PIPELINE", "0") == "1":
+        if submitted and self._mode == "pipeline":
             return self.poll_pipelined()
-        if submitted and os.environ.get("PREDTAC_BLOCKING", "0") == "1":
+        if submitted and self._mode == "blocking":
             return self.poll_blocking()
         return self.poll()
 
@@ -253,7 +278,10 @@ class PredTacClient:
         if timeout_s is None:
             timeout_s = float(os.environ.get("PREDTAC_BLOCK_TIMEOUT_S", "60"))
         if resubmit_interval_s is None:
-            resubmit_interval_s = float(os.environ.get("PREDTAC_RESUBMIT_S", "1.0"))
+            # the servers answer every tick (frame_interval=1) in every configuration that selects blocking by mode/file, so a
+            # resubmission would only inject a duplicate frame; the legacy flag keeps the old 1.0 s default
+            default = "1.0" if self._mode_src.startswith("legacy") else "1e9"
+            resubmit_interval_s = float(os.environ.get("PREDTAC_RESUBMIT_S", default))
         if self._tick == 0:
             return self.continuous, self.binary
         seen_before = self.last_tick_seen
