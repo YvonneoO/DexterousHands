@@ -18,6 +18,7 @@ import json
 import os
 from collections import deque
 
+import numpy as np_
 import torch
 
 from tactile_collection.noisy_tactile import LINK_NAMES, NUM_LINKS, PALM_IDX, LFMETA_IDX, PALM_OVERLAP_RATIO
@@ -57,7 +58,7 @@ class QualityMonitor:
         self.every = int(os.environ.get("PREDTAC_QUALITY_EVERY", "200"))
         self.npz = os.environ.get("PREDTAC_QUALITY_NPZ") or (
             os.path.join(os.environ["PREDTAC_DUMP_DIR"], "quality_raw.npz") if os.environ.get("PREDTAC_DUMP_DIR") else None)
-        self.raw = {"cont": [], "binary": [], "force": [], "label": []}
+        self.raw = {"cont": [], "binary": [], "force": [], "label": [], "req_tick": [], "resp_ticks": []}
         self.use_label = os.environ.get("PREDTAC_QUALITY_CONTACTS", "0") == "1"
         self.lab_acc = None
         self.hist = deque(maxlen=K + 1)
@@ -132,6 +133,9 @@ class QualityMonitor:
             self.raw["cont"].append(c[:, 1].cpu().numpy()); self.raw["binary"].append(b[:, 1].cpu().numpy())
             self.raw["force"].append(g[:, 1].cpu().numpy())
             self.raw["label"].append((lab if lab is not None else g)[:, 1].cpu().numpy())
+            cl = getattr(self.task, "_predtac_client", None)           # which request each shard's response used (staleness, per shard)
+            self.raw["req_tick"].append(np_.int64((cl._tick - 1) if cl is not None else -1))
+            self.raw["resp_ticks"].append(np_.asarray(list(cl._shard_tick_seen) if cl is not None else [-1], np_.int64))
             if len(self.raw["cont"]) % 100 == 0:
                 import numpy as np
                 os.makedirs(os.path.dirname(os.path.abspath(self.npz)), exist_ok=True)
