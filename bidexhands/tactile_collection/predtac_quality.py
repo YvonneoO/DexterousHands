@@ -55,6 +55,11 @@ class QualityMonitor:
         gt_names = [n.split(":")[1] for n in task.fingertips] + [n.split(":")[1] for n in task.tactile_extra_links]
         self.perm = torch.as_tensor([gt_names.index(n) for n in LINK_NAMES], device=self.device, dtype=torch.long)
         self.every = int(os.environ.get("PREDTAC_QUALITY_EVERY", "200"))
+        self.npz = os.environ.get("PREDTAC_QUALITY_NPZ") or (
+            os.path.join(os.environ["PREDTAC_DUMP_DIR"], "quality_raw.npz") if os.environ.get("PREDTAC_DUMP_DIR") else None)
+        self.raw = {"cont": [], "binary": [], "force": [], "label": []}
+        self.use_label = os.environ.get("PREDTAC_QUALITY_CONTACTS", "0") == "1"
+        self.lab_acc = None
         self.hist = deque(maxlen=K + 1)
         self.steps = 0
         self._reset_acc()
@@ -83,12 +88,69 @@ class QualityMonitor:
         force[..., LFMETA_IDX] = combined
         return (force * self.scale).clamp(0.0, 1.0)
 
+    def _label(self):
+        """The predictor's TRAINING-label definition, online: per env EgoTouchTaxelMapper.project(get_env_rigid_contacts) -> /vmax ->
+        clip -> max over each anatomical link's cells -> (N, 2, 17) [left, right]. PREDTAC_QUALITY_CONTACTS=1 (+ PREDTAC_QUALITY_VMAX)."""
+        import numpy as np
+        t = self.task
+        if not hasattr(self, "_lab_mappers"):
+            from tactile_collection.egotouch_taxels import EgoTouchTaxelMapper, _layout, _load_valid_cells
+            d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+            mpr = os.path.join(d, "pressure_position_mapping_right.json")
+            mpl = os.path.join(d, "pressure_position_mapping_left.json")
+            self._lab_mappers = [(EgoTouchTaxelMapper(t.gym, e, "another_hand", "left", mpl),
+                                  EgoTouchTaxelMapper(t.gym, e, "hand", "right", mpr)) for e in t.envs]
+            groups = _layout("right", _load_valid_cells(mpr))
+            names = sorted(groups)
+            assert names == list(LINK_NAMES), (names, list(LINK_NAMES))
+            self._lab_masks = np.zeros((len(names), 21, 21), bool)
+            for l, n in enumerate(names):
+                for r, c_ in groups[n]:
+                    self._lab_masks[l, r, c_] = True
+            self._lab_vmax = float(os.environ.get("PREDTAC_QUALITY_VMAX", "0"))
+            assert self._lab_vmax > 0, "set PREDTAC_QUALITY_VMAX for PREDTAC_QUALITY_CONTACTS"
+            print(f"[predtac][quality] label monitor on (contact API -> grid -> 17 links), vmax={self._lab_vmax}", flush=True)
+        out = np.zeros((t.num_envs, 2, len(LINK_NAMES)), np.float32)
+        for i, e in enumerate(t.envs):
+            contacts = t.gym.get_env_rigid_contacts(e)
+            for h, m in enumerate(self._lab_mappers[i]):
+                pa, _, _ = m.project(contacts)
+                pn = np.clip(np.nan_to_num(pa) / self._lab_vmax, 0.0, 1.0)
+                for l in range(len(LINK_NAMES)):
+                    out[i, h, l] = pn[self._lab_masks[l]].max()
+        return torch.as_tensor(out, device=self.device)
+
     @torch.no_grad()
     def update(self, cont_np, bin_np, stale_ticks, capture_every):
         g = self._gt()
         self.hist.append(g)
         c = torch.as_tensor(cont_np, device=self.device, dtype=torch.float32)
         b = torch.as_tensor(bin_np, device=self.device, dtype=torch.float32)
+        lab = self._label() if self.use_label else None
+        if self.npz:
+            # raw per-step arrays (right hand = slot 1) in the layout replay_online_dump.py reads; index == env-step counter
+            self.raw["cont"].append(c[:, 1].cpu().numpy()); self.raw["binary"].append(b[:, 1].cpu().numpy())
+            self.raw["force"].append(g[:, 1].cpu().numpy())
+            self.raw["label"].append((lab if lab is not None else g)[:, 1].cpu().numpy())
+            if len(self.raw["cont"]) % 100 == 0:
+                import numpy as np
+                os.makedirs(os.path.dirname(os.path.abspath(self.npz)), exist_ok=True)
+                np.savez(self.npz, **{k: np.stack(v) for k, v in self.raw.items()})
+        if lab is not None:
+            A = self.lab_acc or dict(n=0, pos=0.0, neg=0.0, tp=0.0, fp=0.0, xs=[], ys=[], gs=[])
+            lb = lab > self.thr; pb = c > self.thr
+            A["n"] += 1; A["pos"] += float(lb.sum()); A["neg"] += float((~lb).sum())
+            A["tp"] += float((pb & lb).sum()); A["fp"] += float((pb & ~lb).sum())
+            A["xs"].append(c.flatten().cpu()); A["ys"].append(lab.flatten().cpu()); A["gs"].append(g.flatten().cpu())
+            self.lab_acc = A
+            if A["n"] % self.every == 0:
+                x, y, gg = torch.cat(A["xs"]).double(), torch.cat(A["ys"]).double(), torch.cat(A["gs"]).double()
+                cor = lambda a_, b_: float(torch.corrcoef(torch.stack([a_, b_]))[0, 1]) if a_.std() > 0 and b_.std() > 0 else float("nan")
+                print(f"[predtac][quality][label] n={A['n']} label_pos={A['pos'] / max(A['pos'] + A['neg'], 1):.4f} "
+                      f"link-tpr={A['tp'] / max(A['pos'], 1):.3f} link-fpr={A['fp'] / max(A['neg'], 1):.4f} "
+                      f"corr(pred,label)={cor(x, y):.3f} corr(pred,vec_sensor_gt)={cor(x, gg):.3f} corr(vec_sensor_gt,label)={cor(gg, y):.3f}",
+                      flush=True)
+                self.lab_acc = None
         self.steps += 1
         if float(c.abs().sum()) == 0.0 and float(b.sum()) == 0.0:
             return                                              # no response yet (or none non-zero): nothing to compare
