@@ -6,6 +6,12 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import os
+try:  # online Pred-Tac runs: turn a hung IsaacGym/gymtorch startup into a quick failure (see startup_watchdog.py)
+    import startup_watchdog as _sw
+    _sw.start()
+except Exception as _e:  # never let the watchdog break a run
+    _sw = None
+    print("[watchdog] not active:", _e, flush=True)
 from ast import arg
 import numpy as np
 import random
