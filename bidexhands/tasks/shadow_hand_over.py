@@ -891,7 +891,7 @@ class ShadowHandOver(BaseTask):
         sides_all_envs, _eyes, _targets = build_bimanual_boxes_all_envs(
             self, self._predtac_cameras, self._predtac_palm_handles, self._predtac_width, self._predtac_height)
         frames = render_all_and_capture(self, self._predtac_cameras, self._predtac_width, self._predtac_height)
-        self._predtac_client.submit(frames, sides_all_envs)
+        self._predtac_client.submit(frames, sides_all_envs, progress=self.progress_buf, capture_every=1)
         # PREDTAC_BLOCKING=1 trades sim throughput for near-zero staleness --
         # see shadow_hand_pen.py's identical block for the full rationale.
         if os.environ.get("PREDTAC_BLOCKING", "0") == "1":

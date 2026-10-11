@@ -58,15 +58,34 @@ class PredTacClient:
         self._shard_slices = [(int(p[0]), int(p[-1]) + 1) for p in parts if p.size > 0]
         self._shard_runs = [run_id] if self.num_shards == 1 else [f"{run_id}_s{k}" for k in range(len(self._shard_slices))]
         self._shard_tick_seen = [-1] * len(self._shard_runs)
+        # per-env first tick whose response is valid: a response older than the env's last episode start describes the
+        # PREVIOUS episode and must not reach the policy (see submit's `progress`)
+        self._valid_from = np.zeros(num_envs, dtype=np.int64)
+        self._last_reset = None
         for r in self._shard_runs:
             predtac_ipc.reset_run(r)
 
-    def submit(self, frames_uint8, sides_all_envs):
+    def submit(self, frames_uint8, sides_all_envs, progress=None, capture_every=1):
         """frames_uint8: (num_envs,H,W,3) uint8, one rendered frame per env
         (multi_env_camera.render_all_and_capture's output). sides_all_envs:
         list of length num_envs of gt_pose_crop "sides" dicts
         ({"left": {"box": [x1,y1,x2,y2]}, "right": {...}}, either key
-        possibly absent)."""
+        possibly absent).
+        progress: the task's progress_buf (steps since this env's last reset; the first observation of a new episode has
+        progress 1). A frame is the first of a new episode iff progress <= capture_every (capture_every = env steps between
+        two submits), which is exact whatever the episode phase of the capture grid. Flagged envs (a) tell the server to
+        drop that env's temporal window and (b) get their cached reading zeroed and responses to older ticks ignored.
+        Without it the 8-frame window (28 env steps back) keeps mixing the previous episode into the first ~28 steps of
+        every episode, and the policy's first observations carry the previous episode's tactile."""
+        reset = None
+        if progress is not None:
+            p = progress.detach().cpu().numpy() if hasattr(progress, "detach") else np.asarray(progress)
+            reset = np.asarray(p).reshape(-1) <= int(capture_every)
+            if reset.any():
+                self._valid_from[reset] = self._tick
+                self.continuous[reset] = 0.0
+                self.binary[reset] = 0.0
+        self._last_reset = reset
         boxes = np.full((self.num_envs, 2, 4), np.nan, dtype=np.float32)
         has_hand = np.zeros((self.num_envs, 2), dtype=bool)
         for i, sides in enumerate(sides_all_envs):
@@ -80,18 +99,19 @@ class PredTacClient:
             # full frame -- the server then does no CPU cropping (see predtac_crop.py)
             from tactile_collection import predtac_crop
             small, crops = predtac_crop.build_payload(frames_uint8, boxes, has_hand, pool=self._pool)
-            self._write_shards(self._tick, small, crops, boxes, has_hand)
+            self._write_shards(self._tick, small, crops, boxes, has_hand, reset)
             frames_uint8 = (small, crops)       # cached for poll_blocking's resubmission
         else:
-            predtac_ipc.write_request(self.run_id, self._tick, frames_uint8, boxes, has_hand)
+            predtac_ipc.write_request(self.run_id, self._tick, frames_uint8, boxes, has_hand, reset)
         self._tick += 1
         self._last_frames = frames_uint8
         self._last_boxes = boxes
         self._last_has_hand = has_hand
 
-    def _write_shards(self, tick, small, crops, boxes, has_hand):
+    def _write_shards(self, tick, small, crops, boxes, has_hand, reset=None):
         for run, (a, b) in zip(self._shard_runs, self._shard_slices):
-            predtac_ipc.write_request_v2(run, tick, small[a:b], crops[a:b], boxes[a:b], has_hand[a:b])
+            predtac_ipc.write_request_v2(run, tick, small[a:b], crops[a:b], boxes[a:b], has_hand[a:b],
+                                         None if reset is None else reset[a:b])
 
     def poll(self):
         """Non-blocking. Updates self.continuous/self.binary in place if a
@@ -114,8 +134,13 @@ class PredTacClient:
             # before any response has ever arrived, so replacing NaN with 0
             # here is consistent with that existing convention, not a new
             # semantics.
-            self.continuous[a:b] = np.nan_to_num(resp["continuous"], nan=0.0)
-            self.binary[a:b] = np.nan_to_num(resp["binary"], nan=0.0)
+            ok = self._valid_from[a:b] <= resp["tick"]          # envs whose response is from the current episode
+            if ok.all():
+                self.continuous[a:b] = np.nan_to_num(resp["continuous"], nan=0.0)
+                self.binary[a:b] = np.nan_to_num(resp["binary"], nan=0.0)
+            elif ok.any():
+                self.continuous[a:b][ok] = np.nan_to_num(resp["continuous"], nan=0.0)[ok]
+                self.binary[a:b][ok] = np.nan_to_num(resp["binary"], nan=0.0)[ok]
         # the worst (oldest) shard defines how fresh the whole reading is -- staleness/blocking use this
         self.last_tick_seen = min(self._shard_tick_seen)
         return self.continuous, self.binary
@@ -196,10 +221,10 @@ class PredTacClient:
             if now > next_resubmit and self._last_frames is not None:
                 if self._sim_crop:
                     self._write_shards(self._tick, self._last_frames[0], self._last_frames[1],
-                                       self._last_boxes, self._last_has_hand)
+                                       self._last_boxes, self._last_has_hand, self._last_reset)
                 else:
                     predtac_ipc.write_request(self.run_id, self._tick, self._last_frames,
-                                               self._last_boxes, self._last_has_hand)
+                                               self._last_boxes, self._last_has_hand, self._last_reset)
                 self._tick += 1
                 next_resubmit = now + resubmit_interval_s
             time.sleep(poll_interval_s)

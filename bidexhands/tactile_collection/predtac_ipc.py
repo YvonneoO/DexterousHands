@@ -56,31 +56,37 @@ def response_path(run_id):
     return os.path.join(run_dir(run_id), "response.npz")
 
 
-def write_request(run_id, tick, frames_uint8, boxes, has_hand):
+def write_request(run_id, tick, frames_uint8, boxes, has_hand, reset=None):
     """frames_uint8: (N,H,W,3) uint8. boxes: (N,2,4) float32, hand order
-    [left, right], NaN where has_hand is False. has_hand: (N,2) bool."""
-    _atomic_write_npz(
-        request_path(run_id),
+    [left, right], NaN where has_hand is False. has_hand: (N,2) bool.
+    reset: optional (N,) bool, True where this frame is the first one of a new episode for that env -- the server then
+    drops that env's temporal window instead of mixing the previous episode's frames into it."""
+    arrays = dict(
         tick=np.asarray(tick, dtype=np.int64),
         frames=np.asarray(frames_uint8, dtype=np.uint8),
         boxes=np.asarray(boxes, dtype=np.float32),
         has_hand=np.asarray(has_hand, dtype=bool),
     )
+    if reset is not None:
+        arrays["reset"] = np.asarray(reset, dtype=bool)
+    _atomic_write_npz(request_path(run_id), **arrays)
 
 
-def write_request_v2(run_id, tick, small_rgb, crops, boxes, has_hand):
+def write_request_v2(run_id, tick, small_rgb, crops, boxes, has_hand, reset=None):
     """Pre-processed request (predtac_crop.build_payload): small_rgb (N,224,224,3) uint8 for the DINO branch, crops
     (N,2,256,256,3) uint8 WiLoR hand crops (RGB, left hands already mirrored, zeros where has_hand is False). ~4x smaller
     than write_request's full 960x720 frames, and the server does no CPU cropping. The server tells the two apart by
-    the presence of the "small" key."""
-    _atomic_write_npz(
-        request_path(run_id),
+    the presence of the "small" key. reset: optional (N,) bool episode-start flag, see write_request."""
+    arrays = dict(
         tick=np.asarray(tick, dtype=np.int64),
         small=np.asarray(small_rgb, dtype=np.uint8),
         crops=np.asarray(crops, dtype=np.uint8),
         boxes=np.asarray(boxes, dtype=np.float32),
         has_hand=np.asarray(has_hand, dtype=bool),
     )
+    if reset is not None:
+        arrays["reset"] = np.asarray(reset, dtype=bool)
+    _atomic_write_npz(request_path(run_id), **arrays)
 
 
 def read_request(run_id):
@@ -96,6 +102,7 @@ def read_request(run_id):
                 "tick": int(data["tick"]),
                 "boxes": data["boxes"],
                 "has_hand": data["has_hand"],
+                "reset": data["reset"] if "reset" in data.files else None,   # (N,) bool episode-start flag, or None (older client)
             }
             if "small" in data.files:          # write_request_v2 payload (sim-side crops)
                 out["small"] = data["small"]
