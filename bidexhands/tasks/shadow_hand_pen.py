@@ -1275,10 +1275,7 @@ class ShadowHandPen(BaseTask):
             # prediction-quality as separate confounds, or for a training-time
             # ablation testing whether stale tactile is actively harmful during
             # learning (not just uninformative).
-            if os.environ.get("PREDTAC_BLOCKING", "0") == "1" and _submitted:
-                continuous_np, binary_np = self._predtac_client.poll_blocking()
-            else:
-                continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
+            continuous_np, binary_np = self._predtac_client.poll_mode(_submitted)  # each (num_envs, 2, 17), slot 0=left, 1=right
 
             # Temporary staleness diagnostic (2026-09-10): how many client ticks
             # old is the tactile reading actually feeding the policy right now,

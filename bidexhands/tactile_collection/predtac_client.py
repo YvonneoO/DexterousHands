@@ -62,6 +62,7 @@ class PredTacClient:
         # PREVIOUS episode and must not reach the policy (see submit's `progress`)
         self._valid_from = np.zeros(num_envs, dtype=np.int64)
         self._last_reset = None
+        self._wait = {"n": 0, "sum": 0.0, "max": 0.0}
         for r in self._shard_runs:
             predtac_ipc.reset_run(r)
 
@@ -159,6 +160,46 @@ class PredTacClient:
             return None  # no response ever received -- still serving all-zero fallback
         return (self._tick - 1) - self.last_tick_seen
 
+    def _note_wait(self, mode, dt):
+        w = self._wait
+        w["n"] += 1; w["sum"] += dt; w["max"] = max(w["max"], dt)
+        if w["n"] % 25 == 0:
+            print(f"[predtac][wait] mode={mode} waits={w['n']} mean_wait_ms={1000 * w['sum'] / w['n']:.0f} "
+                  f"max_wait_ms={1000 * w['max']:.0f}", flush=True)
+
+    def poll_mode(self, submitted):
+        """One entry point for the three ways a task can read the predictor (env at call time):
+        PREDTAC_BLOCKING=1  synchronous: on a captured step wait for the answer to the frame just submitted;
+        PREDTAC_PIPELINE=1  pipelined: on a captured step wait only for the answer to the PREVIOUS captured frame (the sim runs a whole
+                            capture interval while the server works on the newest frame; fixed staleness of one capture, no drops
+                            as long as the server needs less than one sim capture interval + the wait);
+        otherwise           asynchronous (take whatever is freshest). Steps that did not capture never wait."""
+        if submitted and os.environ.get("PREDTAC_PIPELINE", "0") == "1":
+            return self.poll_pipelined()
+        if submitted and os.environ.get("PREDTAC_BLOCKING", "0") == "1":
+            return self.poll_blocking()
+        return self.poll()
+
+    def poll_pipelined(self, lag=1, timeout_s=None, poll_interval_s=0.005):
+        """Wait until the server has answered tick (last submitted - lag) -- an EXACT target, so the server must answer every tick
+        (frame_interval=1). Returns the freshest reading (shards' minimum)."""
+        if timeout_s is None:
+            timeout_s = float(os.environ.get("PREDTAC_BLOCK_TIMEOUT_S", "60"))
+        target = (self._tick - 1) - int(lag)
+        self.poll()
+        if target < 0 or self.last_tick_seen >= target:
+            return self.continuous, self.binary
+        t0 = time.time()
+        while self.last_tick_seen < target:
+            if time.time() - t0 > timeout_s:
+                print(f"[predtac][pipeline] timeout after {timeout_s}s waiting for tick {target} (seen {self.last_tick_seen}) "
+                      f"-- falling back to the stale value", flush=True)
+                break
+            time.sleep(poll_interval_s)
+            self.poll()
+        self._note_wait("pipeline", time.time() - t0)
+        return self.continuous, self.binary
+
     def poll_blocking(self, timeout_s=None, poll_interval_s=0.02, resubmit_interval_s=None):
         """Blocking variant of poll(): spins until a genuinely NEW response
         (any tick newer than whatever was known when this was called) has
@@ -216,6 +257,7 @@ class PredTacClient:
         if self._tick == 0:
             return self.continuous, self.binary
         seen_before = self.last_tick_seen
+        _t_wait0 = time.time()
         deadline = time.time() + timeout_s
         next_resubmit = time.time() + resubmit_interval_s
         while self.last_tick_seen <= seen_before:
@@ -236,4 +278,5 @@ class PredTacClient:
                 next_resubmit = now + resubmit_interval_s
             time.sleep(poll_interval_s)
             self.poll()
+        self._note_wait("blocking", time.time() - _t_wait0)
         return self.continuous, self.binary

@@ -894,10 +894,7 @@ class ShadowHandOver(BaseTask):
         self._predtac_client.submit(frames, sides_all_envs, progress=self.progress_buf, capture_every=1)
         # PREDTAC_BLOCKING=1 trades sim throughput for near-zero staleness --
         # see shadow_hand_pen.py's identical block for the full rationale.
-        if os.environ.get("PREDTAC_BLOCKING", "0") == "1":
-            continuous_np, binary_np = self._predtac_client.poll_blocking()
-        else:
-            continuous_np, binary_np = self._predtac_client.poll()  # each (num_envs, 2, 17), slot 0=left, 1=right
+        continuous_np, binary_np = self._predtac_client.poll_mode(True)  # each (num_envs, 2, 17), slot 0=left, 1=right
 
         num_links = continuous_np.shape[-1]
         continuous = self.predtac_continuous_obs_scale * _torch.from_numpy(continuous_np).to(self.device)
