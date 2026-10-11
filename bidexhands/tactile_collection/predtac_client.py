@@ -159,7 +159,7 @@ class PredTacClient:
             return None  # no response ever received -- still serving all-zero fallback
         return (self._tick - 1) - self.last_tick_seen
 
-    def poll_blocking(self, timeout_s=15.0, poll_interval_s=0.02, resubmit_interval_s=1.0):
+    def poll_blocking(self, timeout_s=None, poll_interval_s=0.02, resubmit_interval_s=None):
         """Blocking variant of poll(): spins until a genuinely NEW response
         (any tick newer than whatever was known when this was called) has
         arrived, instead of taking whatever's freshest so far like poll()
@@ -206,6 +206,13 @@ class PredTacClient:
         Falls back to whatever's freshest and prints a warning if timeout_s
         elapses first, rather than hanging forever on a dead or
         permanently-behind server."""
+        # env knobs: PREDTAC_BLOCK_TIMEOUT_S (default 60) and PREDTAC_RESUBMIT_S (default 1.0). With the server's frame_interval=1
+        # (every request answered) the resubmission must be OFF (set PREDTAC_RESUBMIT_S very large): a slow tick would otherwise be
+        # re-sent as a second, duplicate frame and corrupt the temporal window.
+        if timeout_s is None:
+            timeout_s = float(os.environ.get("PREDTAC_BLOCK_TIMEOUT_S", "60"))
+        if resubmit_interval_s is None:
+            resubmit_interval_s = float(os.environ.get("PREDTAC_RESUBMIT_S", "1.0"))
         if self._tick == 0:
             return self.continuous, self.binary
         seen_before = self.last_tick_seen
