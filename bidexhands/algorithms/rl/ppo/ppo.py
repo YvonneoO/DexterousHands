@@ -61,6 +61,21 @@ class PPO:
                                       self.state_space.shape, self.action_space.shape, self.device, sampler)
         self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=self.learning_rate)
 
+        # PREDTAC_TAC_DECAY=<d>: online Pred-Tac policies (406 inputs = 2 hands x [dof+fingertips 137 | tactile 34 | pose+actions 32]) shrink the
+        # input columns of the tactile slots in the first actor / critic layer by (1-d) after every optimizer step. The warm start leaves those
+        # columns at zero; when the predicted tactile carries no usable signal (online prediction vs sim contact correlation ~0) the noisy gradients
+        # would otherwise random-walk them away from zero and degrade the policy. A sustained, consistent gradient still gets through.
+        self._tac_decay = float(os.environ.get("PREDTAC_TAC_DECAY", "0") or 0)
+        self._tac_params = []
+        if self._tac_decay > 0:
+            pre, tac, post = 137, 34, 32
+            cols = [h * (pre + tac + post) + pre + j for h in range(2) for j in range(tac)]
+            for name, mod in self.actor_critic.named_modules():
+                if isinstance(mod, nn.Linear) and mod.in_features == 2 * (pre + tac + post):
+                    self._tac_params.append((name, mod.weight))
+            self._tac_cols = torch.as_tensor(cols, device=self.device)
+            print(f"[ppo] tactile-column decay {self._tac_decay} on {[n for n, _ in self._tac_params]} ({len(cols)} columns each)", flush=True)
+
         # PPO parameters
         self.clip_param = learn_cfg["cliprange"]
         self.num_learning_epochs = learn_cfg["noptepochs"]
@@ -410,6 +425,10 @@ class PPO:
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
+                if self._tac_decay > 0:
+                    with torch.no_grad():
+                        for _n, _w in self._tac_params:
+                            _w[:, self._tac_cols] *= (1.0 - self._tac_decay)
 
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
