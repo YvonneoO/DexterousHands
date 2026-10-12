@@ -14,6 +14,9 @@ sits until its walltime and, in a chain, so does every later link. This turns th
              dumps its stack and exits 1, and the bash watcher scancels the job (no node exclusion: a stalled server is as likely as a bad
              node, and a bad node is caught by the startup watchdog of the next link anyway).
 
+Note: the bash watcher fires 90 s before the faulthandler deadline -- an earlier version fired after it and never got to run, because the
+job (and with it the detached watcher) is gone once python exits.
+
 Knobs: STARTUP_WATCHDOG_S (default 1200 s, counted from start()), STALL_WATCHDOG_S (default 900 s between two iterations; the synchronous
 mode waits up to PREDTAC_BLOCK_TIMEOUT_S per capture, so a dead server stretches one iteration to many minutes), STARTUP_WATCHDOG=0 disables.
 """
@@ -26,7 +29,7 @@ _S = {"armed": False, "marker": None}
 
 _WATCHER = r'''
 JOB="$1"; MARK="$2"; T="$3"; LOG="$4"; STALL="$5"; PARENT="$6"; HOST="$(hostname)"
-end=$((SECONDS + T + 45))
+end=$((SECONDS + T - 90))   # act BEFORE faulthandler exits the process: when python dies the job ends and SLURM kills this watcher too
 while [ "$SECONDS" -lt "$end" ]; do [ -f "$MARK" ] && break; sleep 5; done
 if [ -f "$MARK" ]; then
   # training started: from here on watch the marker's age (refreshed by every PPO iteration)
